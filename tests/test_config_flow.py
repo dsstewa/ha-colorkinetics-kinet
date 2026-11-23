@@ -489,7 +489,7 @@ async def test_fixture_order_and_groups_round_trip(hass, probes):
         {"name": "Oaks", "members": [first], "delete": False},
     )
     await hass.async_block_till_done()
-    assert entry.options[CONF_GROUPS][0]["members"] == ["DEADBEEF", "880055BE"]
+    assert entry.options[CONF_GROUPS][0]["members"] == ["880055BE", "DEADBEEF"]
     menu = await hass.config_entries.options.async_init(entry.entry_id)
     groups = await hass.config_entries.options.async_configure(
         menu["flow_id"], {"next_step_id": "groups"}

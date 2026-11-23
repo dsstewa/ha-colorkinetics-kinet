@@ -63,9 +63,18 @@ All fixtures and each group light accept an effect:
 | Alternate | Even and odd fixtures swap. |
 | Breathe | The light's color fades in and out together. |
 
-**Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. Unavailable fixtures are left out of the pattern and are not written, so a missed fixture is not zeroed.
+**Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. An effect does not write fixtures that are unavailable.
 
-A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns. The last color sent to each fixture is stored and restored before the frame pump starts, so a reload does not black out an unavailable fixture. A PORTOUT frame is not zero-padded across a fixture that has never been set.
+A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
+
+## Light frames
+
+Every PORTOUT and DMXOUT frame is at least 24 bytes, the OLA minimum, and it covers every fixture that has a DMX address. For each fixture:
+
+- If this integration has sent it a color, including a color restored after a reload, that color is what goes out. Turning the fixture off is the only way those saved bytes become zeros.
+- If it has never been set and nothing is saved, it is off. The frame carries zeros for those slots, and the light's state is off.
+
+An unavailable fixture is not driven by a new effect or by All fixtures, but its last saved color stays in the frame so a reload or a later fixture does not black it out. Deleting the config entry removes the stored colors.
 
 ## Options
 

@@ -877,30 +877,54 @@ async def test_reload_keeps_the_color_of_an_unavailable_fixture(hass, fake_udp):
     assert packet.data[3:6] == b"\x00\xff\x00"
 
 
-async def test_short_frame_does_not_zero_pad_an_unset_fixture(hass, fake_udp):
+async def test_frames_are_at_least_24_bytes_and_keep_a_saved_color(hass, fake_udp):
+    """Never-set slots are off. A saved color in the middle of the frame stays."""
+    from dataclasses import replace
+
     entry = await _setup(hass, _entry())
     hub = entry.runtime_data
     hub._saved_channels.clear()
     hub._span[SUPPLY_HOST] = 3
     hub._buffers[SUPPLY_HOST] = bytearray(512)
     hub._buffers[SUPPLY_HOST][0:3] = b"\xff\x00\x00"
-    before = len(_light_packets(fake_udp))
     assert hub._transmit(SUPPLY_HOST) is True
     packet = _light_packets(fake_udp)[-1][0]
-    assert len(_light_packets(fake_udp)) == before + 1
-    assert packet.data == b"\xff\x00\x00"
+    assert len(packet.data) >= 24
+    assert packet.data[0:3] == b"\xff\x00\x00"
+    assert packet.data[6:9] == b"\x00\x00\x00"
+
+    middle = hub.get_fixture("88005B93")
+    hub._fixtures["88005B93"] = replace(middle, present=False)
+    neighbor = hub.get_fixture("88002CD9")
+    hub._fixtures["88002CD9"] = replace(neighbor, present=False)
+    hub._saved_channels.pop("88002CD9", None)
+    hub._saved_channels["88005B93"] = b"\x00\xff\x00"
+    hub._buffers[SUPPLY_HOST][6:9] = b"\x00\x00\x00"
+    hub.write_channels(SUPPLY_HOST, 9, b"\xff\x00\x00", schedule=False)
+    assert hub._transmit(SUPPLY_HOST) is True
+    packet = _light_packets(fake_udp)[-1][0]
+    assert len(packet.data) >= 24
+    assert packet.data[6:9] == b"\x00\xff\x00"
+    assert packet.data[9:12] == b"\xff\x00\x00"
+
+    hub._fixtures.clear()
     hub._saved_channels.clear()
-    hub._span[SUPPLY_HOST] = 0
+    hub._span.clear()
     hub._buffers[SUPPLY_HOST] = bytearray(512)
     assert hub._transmit(SUPPLY_HOST) is False
-    from dataclasses import replace
-
-    for key, fixture in list(hub._fixtures.items()):
-        hub._fixtures[key] = replace(fixture, dmx_start=None)
-    assert hub._pad_would_zero_unset(SUPPLY_HOST, 3) is False
     hub._load_cache({"channels": {"880055BE": 1, "88002CD9": "zz"}, "fixtures": {}})
     hub._saved_channels["missing"] = b"\x01\x02\x03"
     hub._restore_saved_channels()
+
+
+async def test_removing_the_entry_deletes_the_channel_store(hass, fake_udp, hass_storage):
+    entry = await _setup(hass, _entry())
+    await entry.runtime_data._save()
+    key = f"color_kinetics_{entry.entry_id}"
+    assert "channels" in hass_storage[key]["data"]
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert key not in hass_storage
 
 
 async def test_address_reread_timeout_keeps_the_previous_start(hass, fake_udp):

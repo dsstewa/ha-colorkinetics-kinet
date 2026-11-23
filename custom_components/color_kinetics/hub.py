@@ -71,7 +71,7 @@ from .pump import FramePump
 
 _LOGGER = logging.getLogger(__name__)
 
-_STORAGE_VERSION = 1
+STORAGE_VERSION = 1
 
 Listener = Any
 
@@ -161,7 +161,7 @@ class ColorKineticsHub:
             send=self._transmit,
         )
         self._store: Store[dict[str, Any]] = Store(
-            hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}"
+            hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}"
         )
         self._fixtures: dict[str, Fixture] = {}
         self._supplies: dict[str, dict[str, Any]] = {}
@@ -721,47 +721,41 @@ class ColorKineticsHub:
             self.pump.mark_dirty(host)
 
     def _splice_unavailable(self, host: str) -> None:
-        """Put the last sent color back into slots we are not driving this session."""
+        """Restore the last sent color for fixtures this session is not driving.
+
+        A fixture Home Assistant has never set has no saved bytes, so its
+        slots stay at the buffer's zeros and the light stays off. A saved
+        color is copied back, including ``00 00 00`` after the user turned
+        that fixture off.
+        """
         buffer = self._buffers.setdefault(host, bytearray(DMX_SLOTS))
         for fixture in self._fixtures.values():
-            if fixture.host != host or self.is_available(fixture):
+            if fixture.host != host or fixture.dmx_start is None or self.is_available(fixture):
                 continue
             saved = self._saved_channels.get(fixture.key)
-            if not saved or fixture.dmx_start is None:
+            if not saved:
                 continue
             start = fixture.dmx_start
             buffer[start : start + len(saved)] = saved
 
     def _outgoing_length(self, host: str) -> int:
-        """Bytes of channel data we have actually set or restored.
+        """Full addressed span, at least the 24-byte OLA minimum.
 
-        Fixtures with no saved color do not extend the frame. Extending it
-        would transmit the zero-filled buffer over their slots.
+        Every fixture with a DMX address is inside the frame. Slots with no
+        saved color are zero, which is off. Returns 0 when this supply has
+        nothing addressed and nothing written, so the pump holds the send.
         """
         self._splice_unavailable(host)
         end = self._span.get(host, 0)
+        addressed = False
         for fixture in self._fixtures.values():
             if fixture.host != host or fixture.dmx_start is None:
                 continue
-            saved = self._saved_channels.get(fixture.key)
-            if not saved:
-                continue
-            end = max(end, fixture.dmx_start + len(saved))
-        return end
-
-    def _pad_would_zero_unset(self, host: str, length: int) -> bool:
-        """True when the 24-byte PORTOUT pad would cover a fixture never set."""
-        if length >= PORTOUT_MIN_DATA:
-            return False
-        for fixture in self._fixtures.values():
-            if fixture.host != host or fixture.dmx_start is None:
-                continue
-            if fixture.key in self._saved_channels:
-                continue
-            start = fixture.dmx_start
-            if start < PORTOUT_MIN_DATA and start + CHANNELS_PER_FIXTURE > length:
-                return True
-        return False
+            addressed = True
+            end = max(end, fixture.dmx_start + CHANNELS_PER_FIXTURE)
+        if end <= 0 and not addressed:
+            return 0
+        return max(end, PORTOUT_MIN_DATA)
 
     def _transmit(self, host: str) -> bool:
         if host not in self.hosts:
@@ -777,13 +771,7 @@ class ColorKineticsHub:
         if protocol == "dmxout":
             packet = build_dmxout(sequence, data)
         else:
-            packet = build_portout(
-                sequence,
-                port,
-                data,
-                version=version,
-                pad=not self._pad_would_zero_unset(host, length),
-            )
+            packet = build_portout(sequence, port, data, version=version)
         self.client.send(host, packet)
         return True
 

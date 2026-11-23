@@ -330,24 +330,19 @@ def build_portout(
     *,
     flags: int = 0,
     version: int = 1,
-    pad: bool = True,
 ) -> bytes:
     """Build a KiNET v2 PORTOUT packet.
 
     ``version`` is the header version field: 1 writes ``01 00`` (OLA),
-    2 writes ``02 00`` (Haukcode). With ``pad`` true, data is zero-padded to
-    at least 24 bytes, matching OLA. Pass ``pad`` false to send exactly
-    ``data``: the pad would otherwise paint ``00`` onto channels that have
-    never been set. ``port`` is the output connector (1-16 on a supply;
+    2 writes ``02 00`` (Haukcode). Data is zero-padded to at least 24 bytes,
+    matching OLA. ``port`` is the output connector (1-16 on a supply;
     0-255 is accepted so the OLA vector with port 255 can be reproduced).
     """
     if not 0 <= port <= 255:
         raise ProtocolError("PORTOUT port must be 0-255")
     if len(data) > DMX_SLOTS:
         raise ProtocolError("PORTOUT channel data must be at most 512 bytes")
-    if not pad and not data:
-        raise ProtocolError("PORTOUT channel data must not be empty when pad is false")
-    length = max(len(data), PORTOUT_MIN_DATA) if pad else len(data)
+    length = max(len(data), PORTOUT_MIN_DATA)
     padded = bytes(data) + bytes(length - len(data))
     tail = struct.pack("<IBBHHH", 0xFFFFFFFF, port, 0, flags, length, 0)
     return _encode_header(TYPE_PORTOUT, sequence, version=version) + tail + padded

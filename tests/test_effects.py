@@ -78,8 +78,21 @@ def test_effect_frames_are_deterministic():
     from custom_components.color_kinetics.order import merge_group_members
 
     assert merge_group_members(
+        ["880055BE", "DEADBEEF", "88002CD9"],
+        ["880055BE", "88002CD9"],
+        {"880055BE", "88002CD9"},
+    ) == ["880055BE", "DEADBEEF", "88002CD9"]
+    assert merge_group_members(
+        ["880055BE", "DEADBEEF", "88002CD9"],
+        ["88002CD9", "880055BE"],
+        {"880055BE", "88002CD9"},
+    ) == ["88002CD9", "880055BE", "DEADBEEF"]
+    assert merge_group_members(
         ["880055BE", "DEADBEEF", "88002CD9"], ["88002CD9"], {"880055BE", "88002CD9"}
     ) == ["DEADBEEF", "88002CD9"]
+    assert apply_submitted_order(
+        ["880055BE", "DEADBEEF", "88002CD9"], ["88002CD9", "880055BE"], []
+    ) == ["88002CD9", "880055BE", "DEADBEEF"]
     engine = EffectEngine()
     engine.start("all", EFFECT_SOLID, ["A"], (255, 0, 0), 255, 5)
     assert engine.active is False
@@ -228,7 +241,9 @@ async def test_group_effect_takes_fixtures_and_skips_unavailable(hass, fake_udp,
     packet = await _wait_light(fake_udp, lambda item: item.data[0:3] == b"\xff\x00\x00")
     assert packet.data[0:3] == b"\xff\x00\x00"
     assert packet.data[3:6] == b"\xff\x00\x00"
+    # 88005B93 never got an address or a saved color, so those slots stay off.
     assert packet.data[6:9] == b"\x00\x00\x00"
+    assert len(packet.data) >= 24
     assert entry.runtime_data.effects.active is False
 
 
