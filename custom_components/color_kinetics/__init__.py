@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 
-from .const import PLATFORMS
-from .hub import ColorKineticsConfigEntry, ColorKineticsHub
+from .const import DOMAIN, PLATFORMS
+from .hub import STORAGE_VERSION, ColorKineticsConfigEntry, ColorKineticsHub
+from .migrate import async_migrate_entry as async_migrate_entry
 
 
 async def async_setup_entry(
@@ -46,3 +49,9 @@ async def async_reload_entry(
 ) -> None:
     """Reload after options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete the stored fixture colors with the config entry."""
+    store: Store[dict] = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}")
+    await store.async_remove()

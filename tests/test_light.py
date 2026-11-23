@@ -124,7 +124,11 @@ async def test_discovery_creates_a_light_per_fixture_of_both_types(hass, fake_ud
             (DOMAIN, f"{serial:08X}"), entry.entry_id
         )
         assert device is not None
-        assert device.model == f"Type 0x{type_code:02X}"
+        assert device.model == {
+            0x18: "Blast PowerCore gen4 3-Ch",
+            0x04: "iW/iColor Burst Powercore",
+        }[type_code]
+        assert device.sw_version is None
         assert device.via_device_id is not None
     assert len(states) == 8
     button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
@@ -135,6 +139,7 @@ async def test_discovery_creates_a_light_per_fixture_of_both_types(hass, fake_ud
     )
     assert supply.model == "Data Enabler Pro"
     assert supply.sw_version == "SFT-000155-00 V34"
+    assert supply.serial_number == SUPPLY_SERIAL
     for data, addr in fake_udp.sent:
         assert packet_type_of(data) in ALLOWED_OUTGOING_TYPES
         assert addr == (SUPPLY_HOST, 6038)
@@ -676,3 +681,265 @@ async def test_scan_in_progress_during_refresh_is_ignored(hass, fake_udp):
     finally:
         hub._locks[SUPPLY_HOST].release()
     assert _entity_id(hass, "light", "880055BE") is not None
+
+
+def _offsets(data: bytes, payload: bytes, *, skip: int | None = None) -> None:
+    """Check every discovered fixture. ``skip`` is left alone: it must not be required to be zero."""
+    for _serial, start, _type_code in FIXTURES:
+        if start == skip:
+            continue
+        assert data[start : start + 3] == payload
+
+
+async def test_all_fixtures_paints_every_fixture_in_one_frame(hass, fake_udp):
+    await _setup(hass, _entry())
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    registry = er.async_get(hass)
+    group_entry = registry.async_get(group)
+    button_entry = registry.async_get(button)
+    assert group_entry.device_id == button_entry.device_id
+    assert group_entry.entity_category is None
+    assert "All fixtures" in hass.states.get(group).name
+
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00")
+    assert hass.states.get(group).state == STATE_ON
+    assert hass.states.get(group).attributes["rgb_color"] == (255, 0, 0)
+    assert hass.states.get(_entity_id(hass, "light", "88005B93")).attributes["rgb_color"] == (
+        255,
+        0,
+        0,
+    )
+
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "brightness": 128},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\x80\x00\x00",
+    )
+    _offsets(packet.data, b"\x80\x00\x00")
+    await asyncio.sleep(0.05)
+    assert len(_light_packets(fake_udp)) == before + 1
+
+    from homeassistant.components.light import DATA_COMPONENT
+
+    entity = hass.data[DATA_COMPONENT].get_entity(group)
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(hs_color=(0, 100), brightness=255)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00")
+    from homeassistant.util.color import color_xy_to_RGB
+
+    expected = scale_rgb(color_xy_to_RGB(0.3, 0.3), 255)
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(xy_color=(0.3, 0.3), brightness=255)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == expected,
+    )
+    _offsets(packet.data, expected)
+
+    kept = tuple(hass.states.get(group).attributes["rgb_color"])
+    one = _entity_id(hass, "light", "880055BE")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": one, "rgb_color": [0, 0, 255], "brightness": 255},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(group).state == STATE_ON
+    assert tuple(hass.states.get(group).attributes["rgb_color"]) == kept
+    assert kept != (0, 0, 255)
+
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(brightness=0)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\x00\x00\x00",
+    )
+    _offsets(packet.data, b"\x00\x00\x00")
+    assert hass.states.get(group).state == STATE_OFF
+    assert hass.states.get(one).state == STATE_OFF
+    from homeassistant.const import STATE_UNAVAILABLE
+
+    hub = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
+    hub._fixtures.clear()
+    await entity.async_turn_on(rgb_color=(1, 2, 3))
+    assert hass.states.get(group).state == STATE_UNAVAILABLE
+
+
+async def test_all_fixtures_skips_an_unavailable_fixture_and_a_manual_one(hass, fake_udp, monkeypatch):
+    monkeypatch.setattr(
+        "custom_components.color_kinetics.protocol.PROP_TIMEOUT", 0.05
+    )
+    fake_udp.skip_props[0x88005B93] = {0x40}
+    await _setup(hass, _entry(manual_fixtures="Porch wash, 40"))
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00", skip=6)
+    assert packet.data[39:42] == b"\x00\x00\x00"
+    assert hass.states.get(_entity_id(hass, "light", "88005B93")).state == STATE_UNAVAILABLE
+    await asyncio.sleep(0.05)
+    assert len(_light_packets(fake_udp)) == before + 1
+
+
+async def test_offline_88005b93_stays_until_a_second_scan_misses_it(hass, fake_udp):
+    await _setup(hass, _entry())
+    entity_id = _entity_id(hass, "light", "88005B93")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": entity_id, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    await _wait_light(fake_udp, lambda item: item.data[6:9] == b"\xff\x00\x00")
+    fake_udp.fixtures = [fixture for fixture in fake_udp.fixtures if fixture[0] != 0x88005B93]
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_ON
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    packet = await _wait_light(fake_udp, lambda item: item.data[6:9] == b"\xff\x00\x00")
+    assert packet.data[6:9] == b"\xff\x00\x00"
+    assert hass.states.get(_entity_id(hass, "sensor", "88005B93:dmx_address")).state == (
+        STATE_UNAVAILABLE
+    )
+
+
+async def test_reload_keeps_the_color_of_an_unavailable_fixture(hass, fake_udp):
+    """A reload must not paint 00 00 00 over a fixture that missed two scans."""
+    entry = await _setup(hass, _entry())
+    entity_id = _entity_id(hass, "light", "88002CD9")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": entity_id, "rgb_color": [0, 255, 0], "brightness": 255},
+        blocking=True,
+    )
+    await _wait_light(fake_udp, lambda item: item.data[3:6] == b"\x00\xff\x00")
+    fake_udp.fixtures = [fixture for fixture in fake_udp.fixtures if fixture[0] != 0x88002CD9]
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    before = len(_light_packets(fake_udp))
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await _settle(hass, entry)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) > before
+        and item.data[3:6] == b"\x00\xff\x00",
+    )
+    assert packet.data[3:6] == b"\x00\xff\x00"
+
+
+async def test_frames_are_at_least_24_bytes_and_keep_a_saved_color(hass, fake_udp):
+    """Never-set slots are off. A saved color in the middle of the frame stays."""
+    from dataclasses import replace
+
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    hub._saved_channels.clear()
+    hub._span[SUPPLY_HOST] = 3
+    hub._buffers[SUPPLY_HOST] = bytearray(512)
+    hub._buffers[SUPPLY_HOST][0:3] = b"\xff\x00\x00"
+    assert hub._transmit(SUPPLY_HOST) is True
+    packet = _light_packets(fake_udp)[-1][0]
+    assert len(packet.data) >= 24
+    assert packet.data[0:3] == b"\xff\x00\x00"
+    assert packet.data[6:9] == b"\x00\x00\x00"
+
+    middle = hub.get_fixture("88005B93")
+    hub._fixtures["88005B93"] = replace(middle, present=False)
+    neighbor = hub.get_fixture("88002CD9")
+    hub._fixtures["88002CD9"] = replace(neighbor, present=False)
+    hub._saved_channels.pop("88002CD9", None)
+    hub._saved_channels["88005B93"] = b"\x00\xff\x00"
+    hub._buffers[SUPPLY_HOST][6:9] = b"\x00\x00\x00"
+    hub.write_channels(SUPPLY_HOST, 9, b"\xff\x00\x00", schedule=False)
+    assert hub._transmit(SUPPLY_HOST) is True
+    packet = _light_packets(fake_udp)[-1][0]
+    assert len(packet.data) >= 24
+    assert packet.data[6:9] == b"\x00\xff\x00"
+    assert packet.data[9:12] == b"\xff\x00\x00"
+
+    hub._fixtures.clear()
+    hub._saved_channels.clear()
+    hub._span.clear()
+    hub._buffers[SUPPLY_HOST] = bytearray(512)
+    assert hub._transmit(SUPPLY_HOST) is False
+    hub._load_cache({"channels": {"880055BE": 1, "88002CD9": "zz"}, "fixtures": {}})
+    hub._saved_channels["missing"] = b"\x01\x02\x03"
+    hub._restore_saved_channels()
+
+
+async def test_removing_the_entry_deletes_the_channel_store(hass, fake_udp, hass_storage):
+    entry = await _setup(hass, _entry())
+    await entry.runtime_data._save()
+    key = f"color_kinetics_{entry.entry_id}"
+    assert "channels" in hass_storage[key]["data"]
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert key not in hass_storage
+
+
+async def test_address_reread_timeout_keeps_the_previous_start(hass, fake_udp):
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    fixture = hub.get_fixture("880055BE")
+    assert fixture is not None and fixture.dmx_start == 0
+    previous_low = fixture.properties.get(0x40)
+    fake_udp.skip_props[0x880055BE] = {0x40, 0x05}
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    updated = hub.get_fixture("880055BE")
+    assert updated is not None
+    assert updated.dmx_start == 0
+    assert updated.properties.get(0x40) == previous_low
+    assert updated.type_code == fixture.type_code
+    assert hub.is_available(updated)

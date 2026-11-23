@@ -12,7 +12,7 @@ Outgoing datagrams are checked against an allow-list before they hit the socket:
 |---|---|
 | Supply poll | `0x0001` |
 | Port list | `0x000a` |
-| Supply property read | `0x0105` (encoder only; the hub does not send it) |
+| Supply property read | `0x0105` (setup and rescan only) |
 | Fixture property read | `0x0203` |
 | Fixture scan | `0x0207` |
 | Light data | `0x0101` DMXOUT or `0x0108` PORTOUT |
@@ -31,14 +31,50 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 
 ## What you get
 
-- One device per Data Enabler (model, firmware, MAC) and a **Rescan fixtures** button on it.
+- One device per Data Enabler (model, firmware, MAC, serial `7F00EB83`) and a **Rescan fixtures** button on it.
+- An **All fixtures** light on that device. It sets every available discovered fixture to the same color in one frame, in the saved fixture order.
+- Named groups (Tree Run, Oaks, and so on) from the options flow. Each group is its own light, with a stable id, and follows its own fixture order.
 - One device and one `light` per fixture, keyed by serial (`880055BE`, …). Renames and areas stick across restarts and rescans.
 - RGB color and brightness (`ColorMode.RGB`). State is optimistic and restored after a restart.
-- Two fixture type codes from this rig (`0x18` and `0x04`) show up as the device model (`Type 0x18`, `Type 0x04`). A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
+- Fixture type `0x18` is **Blast PowerCore gen4 3-Ch**. Type `0x04` is **iW/iColor Burst Powercore**. A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
+- Diagnostic sensors for the fields QuickPlay's values confirmed: DMX address, startup channels, gen4 scale factors, and the supply power time. Other captured properties sit on **Raw properties** without a guessed name. See `docs/PROPERTIES.md`.
 - A fixture has to be missing from two scans in a row before it becomes unavailable. Its last channel values stay in the frame. It is not deleted.
 - Light frames go out on change, at most 40 per second, and the last frame is repeated about once a second so the Data Enabler keeps holding the color.
 
 A scan takes about 14 seconds. It runs once per supply that has never completed a scan, and when you press the button. It is not polled.
+
+## Fixture order, groups, and effects
+
+Open **Configure** on the integration entry.
+
+- **Light output** is the host, protocol, and manual-fixture form.
+- **Fixture order** is a drag-and-drop list of the discovered fixture lights (`reorder` on an entity selector). The saved value is the serial list. Renames do not change it. A fixture found later is added at the end, sorted by DMX address. A fixture that drops off a scan keeps its place in the list.
+- **Groups** adds, renames, reorders, or deletes a named group. Deleting a group removes its light. The group's id does not change when you rename it.
+
+All fixtures and each group light accept an effect:
+
+| Effect | What it does |
+|---|---|
+| Solid | One color. This also stops an effect on that light. |
+| Color wheel | Every fixture in the run cycles hue together. |
+| Rainbow chase | Same cycle, with a hue offset per fixture along the order. |
+| Color chase | The light's color runs along the order; the other fixtures in the run go dark. |
+| Theater chase | Every third fixture, stepping along the order. |
+| Alternate | Even and odd fixtures swap. |
+| Breathe | The light's color fades in and out together. |
+
+**Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. An effect does not write fixtures that are unavailable.
+
+A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
+
+## Light frames
+
+Every PORTOUT and DMXOUT frame is at least 24 bytes, the OLA minimum, and it covers every fixture that has a DMX address. For each fixture:
+
+- If this integration has sent it a color, including a color restored after a reload, that color is what goes out. Turning the fixture off is the only way those saved bytes become zeros.
+- If it has never been set and nothing is saved, it is off. The frame carries zeros for those slots, and the light's state is off.
+
+An unavailable fixture is not driven by a new effect or by All fixtures, but its last saved color stays in the frame so a reload or a later fixture does not black it out. Deleting the config entry removes the stored colors.
 
 ## Options
 

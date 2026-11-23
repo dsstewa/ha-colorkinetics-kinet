@@ -13,6 +13,8 @@ CONF_PROTOCOL: Final = "protocol"
 CONF_PORTOUT_VERSION: Final = "portout_version"
 CONF_OUTPUT_PORT: Final = "output_port"
 CONF_MANUAL_FIXTURES: Final = "manual_fixtures"
+CONF_FIXTURE_ORDER: Final = "fixture_order"
+CONF_GROUPS: Final = "groups"
 
 PROTOCOL_PORTOUT: Final = "portout"
 PROTOCOL_DMXOUT: Final = "dmxout"
@@ -25,4 +27,6 @@ CHANNELS_PER_FIXTURE: Final = 3
 MAX_FPS: Final = 40
 KEEPALIVE_SECONDS: Final = 1.0
 
-PLATFORMS: Final = ["light", "button"]
+DEFAULT_EFFECT_SPEED: Final = 5
+
+PLATFORMS: Final = ["light", "button", "sensor", "number"]

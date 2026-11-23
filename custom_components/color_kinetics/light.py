@@ -6,11 +6,13 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_EFFECT,
     ATTR_HS_COLOR,
     ATTR_RGB_COLOR,
     ATTR_XY_COLOR,
     ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
 from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
@@ -19,8 +21,10 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util import color as color_util
 
-from .const import CHANNELS_PER_FIXTURE, DOMAIN, MANUFACTURER
+from .const import CHANNELS_PER_FIXTURE, DOMAIN
+from .effects import EFFECT_NAMES, EFFECT_SOLID
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub, Fixture
+from .properties import SUFFIX_ALL_FIXTURES
 
 _CHANNELS = CHANNELS_PER_FIXTURE
 
@@ -53,12 +57,25 @@ async def async_setup_entry(
     entry: ColorKineticsConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Create a light for each fixture and add lights found by a later scan."""
+    """Create the group light and one light per fixture."""
     hub = entry.runtime_data
     entities: dict[str, FixtureLight] = {}
+    groups: dict[str, AllFixturesLight] = {}
+    named: dict[str, GroupLight] = {}
 
     def _sync() -> None:
-        added: list[FixtureLight] = []
+        added: list[LightEntity] = []
+        for host in hub.hosts:
+            if host not in groups:
+                group = AllFixturesLight(hub, host, entities)
+                groups[host] = group
+                added.append(group)
+        for spec in hub.light_groups():
+            entity = named.get(spec["id"])
+            if entity is None:
+                entity = GroupLight(hub, spec["id"], entities)
+                named[spec["id"]] = entity
+                added.append(entity)
         for fixture in hub.fixtures():
             entity = entities.get(fixture.key)
             if entity is None:
@@ -69,6 +86,9 @@ async def async_setup_entry(
                 entity.apply_fixture_update()
         if added:
             async_add_entities(added)
+        for group in (*groups.values(), *named.values()):
+            if group.hass is not None:
+                group.publish()
 
     entry.async_on_unload(hub.add_listener(_sync))
     _sync()
@@ -102,17 +122,7 @@ class FixtureLight(RestoreEntity, LightEntity):
     def _device_info(self, fixture: Fixture | None) -> DeviceInfo:
         if fixture is None:
             return DeviceInfo(identifiers={(DOMAIN, self._key)})
-        info: DeviceInfo = DeviceInfo(
-            identifiers={(DOMAIN, fixture.key)},
-            name=fixture.display_name,
-            manufacturer=MANUFACTURER,
-            model=fixture.model,
-            serial_number=fixture.serial_hex,
-        )
-        via = self._hub.supply_device_id(fixture.host)
-        if via:
-            info["via_device_id"] = via
-        return info
+        return self._hub.fixture_device_info(fixture)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -171,6 +181,7 @@ class FixtureLight(RestoreEntity, LightEntity):
         self._push()
         if self.hass is not None:
             self.async_write_ha_state()
+        self._hub.notify_light_states()
 
     def _channels(self) -> bytes:
         if not self._attr_is_on:
@@ -186,6 +197,8 @@ class FixtureLight(RestoreEntity, LightEntity):
         if fixture.host not in self._hub.hosts:
             return
         if not self._hub.is_available(fixture):
+            return
+        if self._key in self._hub.effects.owners:
             return
         if self._attr_is_on:
             payload = self._channels()
@@ -208,11 +221,283 @@ class FixtureLight(RestoreEntity, LightEntity):
             self._attr_brightness = int(kwargs[ATTR_BRIGHTNESS])
         self._attr_is_on = True
         self._attr_color_mode = ColorMode.RGB
+        self._hub.release_fixture_effect(self._key)
         self._push()
         self.async_write_ha_state()
+        self._hub.notify_light_states()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the fixture's channels off. The last color is kept."""
         self._attr_is_on = False
+        self._hub.release_fixture_effect(self._key)
         self._push()
         self.async_write_ha_state()
+        self._hub.notify_light_states()
+
+
+class AllFixturesLight(LightEntity):
+    """One RGB light that paints every available discovered fixture on a supply."""
+
+    _attr_supported_color_modes = {ColorMode.RGB}
+    _attr_color_mode = ColorMode.RGB
+    _attr_supported_features = LightEntityFeature.EFFECT
+    _attr_effect_list = list(EFFECT_NAMES)
+    _attr_effect = EFFECT_SOLID
+    _attr_assumed_state = True
+    _attr_has_entity_name = True
+    _attr_translation_key = SUFFIX_ALL_FIXTURES
+    _attr_icon = "mdi:lightbulb-group"
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        hub: ColorKineticsHub,
+        host: str,
+        lights: dict[str, FixtureLight],
+    ) -> None:
+        """Bind the group to one Data Enabler and the fixture lights on it."""
+        self._hub = hub
+        self._host = host
+        self._lights = lights
+        self._unsub = None
+        self._attr_unique_id = hub.all_fixtures_unique_id(host)
+        self._attr_is_on = False
+        self._attr_brightness = 255
+        self._attr_rgb_color = (255, 255, 255)
+        self._attr_device_info = hub.supply_device_info(host)
+        self._owner_id = hub.all_fixtures_owner(host)
+        self._sync_from_members()
+
+    def _candidate_keys(self) -> list[str]:
+        return [
+            serial
+            for serial in self._hub.fixture_order()
+            if (fixture := self._hub.get_fixture(serial)) is not None
+            and fixture.host == self._host
+            and fixture.source != "manual"
+        ]
+
+    def _members(self) -> list[FixtureLight]:
+        chosen: list[FixtureLight] = []
+        for key in self._candidate_keys():
+            light = self._lights.get(key)
+            fixture = None if light is None else light._fixture()
+            if light is None or fixture is None or not self._hub.is_available(fixture):
+                continue
+            chosen.append(light)
+        return chosen
+
+    def _sync_from_members(self) -> None:
+        members = self._members()
+        self._attr_available = bool(members)
+        if not members:
+            self._attr_is_on = False
+            return
+        self._attr_is_on = any(bool(member.is_on) for member in members)
+        colors = {
+            tuple(int(channel) for channel in (member._attr_rgb_color or (255, 255, 255)))
+            for member in members
+        }
+        levels = {
+            255 if member._attr_brightness is None else int(member._attr_brightness)
+            for member in members
+        }
+        if len(colors) == 1 and len(levels) == 1:
+            self._attr_rgb_color = next(iter(colors))
+            self._attr_brightness = next(iter(levels))
+
+    def publish(self) -> None:
+        """Refresh the aggregated state."""
+        self._attr_device_info = self._hub.supply_device_info(self._host)
+        self._apply_effect_state()
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Follow member lights and fixture availability."""
+        await super().async_added_to_hass()
+        self._unsub = self._hub.add_light_listener(self.publish)
+        self.publish()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop listening."""
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+    def _channels(self) -> bytes:
+        if not self._attr_is_on:
+            return bytes(_CHANNELS)
+        rgb = tuple(self._attr_rgb_color or (255, 255, 255))
+        brightness = 255 if self._attr_brightness is None else int(self._attr_brightness)
+        return scale_rgb((int(rgb[0]), int(rgb[1]), int(rgb[2])), brightness)
+
+    def _stolen(self) -> bool:
+        """True when every member is currently owned by a different effect."""
+        members = self._members()
+        if not members:
+            return False
+        return all(
+            self._hub.effects.owners.get(member._key) not in (None, self._owner_id)
+            for member in members
+        )
+
+    def _apply_effect_state(self) -> None:
+        run = self._hub.effects.runs.get(self._owner_id)
+        if run is not None and run.order:
+            self._attr_effect = run.effect
+            self._attr_is_on = True
+            self._attr_available = bool(self._members())
+            return
+        self._attr_effect = EFFECT_SOLID
+        if self._stolen():
+            self._attr_is_on = False
+            self._attr_available = bool(self._members())
+            return
+        self._sync_from_members()
+
+    def _remember_members(self, members: list[FixtureLight] | None = None) -> None:
+        rgb = tuple(self._attr_rgb_color or (255, 255, 255))
+        for member in self._members() if members is None else members:
+            if member._key in self._hub.effects.owners:
+                continue
+            member._attr_is_on = bool(self._attr_is_on)
+            member._attr_rgb_color = rgb
+            member._attr_brightness = self._attr_brightness
+            member._attr_color_mode = ColorMode.RGB
+            if member.hass is not None:
+                member.async_write_ha_state()
+
+    def _paint(self, payload: bytes, members: list[FixtureLight] | None = None) -> None:
+        chosen = self._members() if members is None else members
+        by_host: dict[str, list[int]] = {}
+        for member in chosen:
+            fixture = member._fixture()
+            by_host.setdefault(fixture.host, []).append(fixture.dmx_start)
+        self._remember_members(chosen)
+        for host, starts in by_host.items():
+            self._hub.write_same_channels(host, starts, payload)
+        self.publish()
+
+    def _parsed_color(self, kwargs: dict[str, Any]) -> tuple[tuple[int, int, int], int]:
+        rgb = tuple(int(channel) for channel in (self._attr_rgb_color or (255, 255, 255)))
+        if ATTR_RGB_COLOR in kwargs:
+            rgb = tuple(int(channel) for channel in kwargs[ATTR_RGB_COLOR])
+        elif ATTR_HS_COLOR in kwargs:
+            rgb = tuple(color_util.color_hs_to_RGB(*kwargs[ATTR_HS_COLOR]))
+        elif ATTR_XY_COLOR in kwargs:
+            rgb = tuple(color_util.color_xy_to_RGB(*kwargs[ATTR_XY_COLOR]))
+        brightness = 255 if self._attr_brightness is None else int(self._attr_brightness)
+        if ATTR_BRIGHTNESS in kwargs:
+            brightness = int(kwargs[ATTR_BRIGHTNESS])
+        return rgb, brightness
+
+    def _claim(self, effect: str) -> None:
+        """Latest command wins: these fixtures leave any other effect."""
+        keys = [member._key for member in self._members()]
+        if effect == EFFECT_SOLID:
+            self._hub.effects.stop(self._owner_id)
+            for key in keys:
+                self._hub.effects.release_fixture(key)
+            return
+        self._hub.effects.start(
+            self._owner_id,
+            effect,
+            keys,
+            tuple(self._attr_rgb_color or (255, 255, 255)),
+            255 if self._attr_brightness is None else int(self._attr_brightness),
+            self._hub.effect_speed(self._owner_id),
+        )
+        self._hub.ensure_effect_loop()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Apply one color, brightness, or effect to every member in order."""
+        if not self._members():
+            self.publish()
+            self._hub.notify_light_states()
+            return
+        if kwargs.get(ATTR_BRIGHTNESS) == 0:
+            await self.async_turn_off()
+            return
+        rgb, brightness = self._parsed_color(kwargs)
+        self._attr_rgb_color = rgb
+        self._attr_brightness = brightness
+        self._attr_is_on = True
+        self._attr_color_mode = ColorMode.RGB
+        effect = kwargs.get(ATTR_EFFECT, self._attr_effect or EFFECT_SOLID)
+        if effect not in EFFECT_NAMES:
+            effect = EFFECT_SOLID
+        self._attr_effect = effect
+        self._claim(effect)
+        if effect == EFFECT_SOLID:
+            self._paint(self._channels())
+            self._hub.notify_light_states()
+            return
+        self._remember_members()
+        self._hub.render_effects(self._hub.effect_clock())
+        self.publish()
+        self._hub.notify_light_states()
+
+    def _members_we_may_turn_off(self) -> list[FixtureLight]:
+        """Fixtures this light may black out. Another effect's fixtures are left alone."""
+        owned: list[FixtureLight] = []
+        for member in self._members():
+            owner = self._hub.effects.owners.get(member._key)
+            if owner is not None and owner != self._owner_id:
+                continue
+            owned.append(member)
+        return owned
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn this light's fixtures off and stop its effect.
+
+        Fixtures another effect owns are not released and are not written.
+        """
+        members = self._members_we_may_turn_off()
+        self._attr_is_on = False
+        self._attr_effect = EFFECT_SOLID
+        self._hub.effects.stop(self._owner_id)
+        self._paint(self._channels(), members)
+        self._hub.notify_light_states()
+
+
+class GroupLight(AllFixturesLight):
+    """A named, ordered subset of fixtures. The id is stable when the name changes."""
+
+    _attr_translation_key = None
+
+    def __init__(
+        self, hub: ColorKineticsHub, group_id: str, lights: dict[str, FixtureLight]
+    ) -> None:
+        """Bind the light to one stored group."""
+        self._group_id = group_id
+        super().__init__(hub, hub.hosts[0] if hub.hosts else "", lights)
+        self._owner_id = hub.group_owner(group_id)
+        self._attr_unique_id = self._owner_id
+        self._apply_group_name()
+
+    def _spec(self) -> dict | None:
+        return next(
+            (group for group in self._hub.light_groups() if group["id"] == self._group_id),
+            None,
+        )
+
+    def _apply_group_name(self) -> None:
+        spec = self._spec()
+        self._attr_name = spec["name"] if spec else "Group"
+        self._attr_icon = "mdi:lightbulb-group"
+        if spec is not None:
+            self._attr_device_info = self._hub.group_device_info(spec)
+
+    def _candidate_keys(self) -> list[str]:
+        spec = self._spec()
+        if spec is None:
+            return []
+        return list(spec["members"])
+
+    def publish(self) -> None:
+        """Refresh name, device, and effect state."""
+        self._apply_group_name()
+        self._apply_effect_state()
+        if self.hass is not None:
+            self.async_write_ha_state()

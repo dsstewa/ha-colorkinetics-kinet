@@ -6,7 +6,6 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
@@ -37,18 +36,8 @@ class RescanButton(ButtonEntity):
         """Bind the button to one supply."""
         self._hub = hub
         self._host = host
-        identifier = hub.supply_identifier(host)
         self._attr_unique_id = hub.button_unique_id(host)
-        info = hub._supplies.get(host) or {}
-        device = DeviceInfo(
-            identifiers={(DOMAIN, identifier)},
-            name=hub.supply_name(host),
-            manufacturer=info.get("manufacturer") or "Philips Color Kinetics",
-            model=info.get("model") or "Data Enabler",
-            sw_version=info.get("firmware") or None,
-            serial_number=info.get("serial_hex"),
-        )
-        self._attr_device_info = device
+        self._attr_device_info = hub.supply_device_info(host)
 
     async def async_press(self) -> None:
         """Scan fixtures on this Data Enabler. Takes about 14 seconds."""

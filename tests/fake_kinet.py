@@ -18,6 +18,7 @@ from custom_components.color_kinetics.protocol import (
     TYPE_FIXTURE_SCAN,
     TYPE_POLL,
     TYPE_PORT_LIST,
+    TYPE_READ_SUPPLY_PROP,
     parse_header,
 )
 
@@ -36,7 +37,16 @@ FIXTURES: tuple[tuple[int, int, int], ...] = (
 )
 
 SUPPLY_HOST = "172.16.10.41"
-SUPPLY_SERIAL = "83EB007F00000000"
+# First four poll-reply serial bytes, little-endian: 83 eb 00 7f -> 7F00EB83.
+SUPPLY_SERIAL = "7F00EB83"
+
+# Supply property values copied from the capture (0x0106 value bytes).
+SUPPLY_PROP_VALUES = {
+    0x0052: bytes.fromhex("2c010000"),
+    0x0051: bytes.fromhex("20000000"),
+    0x044D: bytes.fromhex("ffff0180"),
+    0x044E: bytes.fromhex("ffff0280"),
+}
 
 
 def load_capture() -> list[dict]:
@@ -142,6 +152,7 @@ class SupplyScript:
         self.status_overrides: dict[tuple[int, int], int] = {}
         self.limit: int | None = None
         self.finish_scan = True
+        self.supply_props = dict(SUPPLY_PROP_VALUES)
         self.sent: list[tuple[bytes, tuple]] = []
         self.reply_ports: list[int] = []
         self.transports: list[FakeTransport] = []
@@ -158,6 +169,21 @@ class SupplyScript:
                 return dmx & 0xFF
             if prop == 0x05:
                 return type_code
+            if prop in (0x43, 0x44, 0x45):
+                return 0
+            if prop == 0x6E:
+                return 1
+            if type_code == 0x18:
+                if prop == 0xC0:
+                    return 4
+                if prop == 0x6D:
+                    return 1
+                if prop in (0xCC, 0xC2):
+                    return 0
+                if prop == 0x4F:
+                    return 1
+                if prop in (0x60, 0x61, 0x62):
+                    return 255
         return None
 
     def __call__(self, data: bytes, addr: tuple) -> list[tuple[bytes, int]]:
@@ -178,6 +204,15 @@ class SupplyScript:
             return [(with_sequence(self.port_reply, sequence), 6038)]
         if header.packet_type == TYPE_FIXTURE_SCAN:
             return self._scan_replies(sequence)
+        if header.packet_type == TYPE_READ_SUPPLY_PROP:
+            prop = struct.unpack_from("<I", data, 12)[0]
+            value = self.supply_props.get(prop)
+            if value is None:
+                return []
+            reply = struct.pack("<IHHI", MAGIC, 1, 0x0106, sequence) + struct.pack(
+                "<HH", prop & 0xFFFF, 0x4000
+            )
+            return [(reply + value, 6038)]
         if header.packet_type == TYPE_FIXTURE_PROP:
             serial, prop = struct.unpack_from("<II", data, 12)
             value = self.prop_value(serial, prop)

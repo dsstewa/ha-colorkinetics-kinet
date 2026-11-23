@@ -27,6 +27,15 @@
     "step": {
       "init": {
         "title": "Color Kinetics options",
+        "description": "Change the light output, the order fixtures chase in, or named groups.",
+        "menu_options": {
+          "output": "Light output",
+          "fixture_order": "Fixture order",
+          "groups": "Groups"
+        }
+      },
+      "output": {
+        "title": "Light output",
         "description": "Light data is unicast KiNET. v2 PORTOUT with header version 1 matches OLA. If a fixture stays dark, try header version 2, then v1 DMXOUT. The output port applies to PORTOUT only. These settings apply to every supply in this entry.",
         "data": {
           "hosts": "Data Enabler IP addresses",
@@ -42,6 +51,29 @@
           "output_port": "Physical output on the Data Enabler, 1 to 16. This supply uses port 1. Ignored for DMXOUT.",
           "manual_fixtures": "One fixture per line if discovery misses it: serial_or_label, dmx_start[, label]. DMX start is 1-based, as QuickPlay shows it. An 8-digit hex token is a serial. With more than one supply, start the line with the supply IP. Example: 880055BE, 1, Oak left"
         }
+      },
+      "fixture_order": {
+        "title": "Fixture order",
+        "description": "Drag the handles to order discovered fixtures. Current order: {order}. The list is stored by serial, so renames survive. Fixtures found later are added at the end. A fixture that is missing from a scan keeps its place.",
+        "data": {
+          "fixtures": "Fixtures"
+        }
+      },
+      "groups": {
+        "title": "Groups",
+        "description": "Add a group such as Tree Run or Oaks, edit one, or choose Done.",
+        "data": {
+          "group_action": "Group"
+        }
+      },
+      "group_edit": {
+        "title": "Edit {name}",
+        "description": "Drag members into the order this group's effects will follow. The group keeps its id if you rename it.",
+        "data": {
+          "name": "Name",
+          "members": "Fixtures",
+          "delete": "Delete this group"
+        }
       }
     },
     "error": {
@@ -49,13 +81,43 @@
       "invalid_host": "Enter one or more IPv4 unicast addresses, one per line.",
       "no_hosts": "Leave at least one Data Enabler address.",
       "already_configured": "One of these Data Enablers is already configured on another entry.",
-      "invalid_manual": "{detail}"
+      "invalid_manual": "{detail}",
+      "invalid_group": "Enter a name for the group.",
+      "duplicate_group": "A group with this name already exists.",
+      "group_members": "Choose at least one fixture."
     }
   },
   "entity": {
     "button": {
       "rescan": {
         "name": "Rescan fixtures"
+      }
+    },
+    "light": {
+      "all_fixtures": {
+        "name": "All fixtures"
+      }
+    },
+    "number": {
+      "effect_speed": {
+        "name": "Effect speed"
+      }
+    },
+    "sensor": {
+      "power_time": {
+        "name": "Power time"
+      },
+      "dmx_address": {
+        "name": "DMX address"
+      },
+      "startup_channels": {
+        "name": "Startup channels"
+      },
+      "scale_factors": {
+        "name": "Channel scale factors"
+      },
+      "raw_properties": {
+        "name": "Raw properties"
       }
     }
   },
@@ -85,6 +147,12 @@
       "options": {
         "1": "1 (01 00, OLA)",
         "2": "2 (02 00, Haukcode)"
+      }
+    },
+    "group_action": {
+      "options": {
+        "add": "Add group",
+        "done": "Done"
       }
     }
   }

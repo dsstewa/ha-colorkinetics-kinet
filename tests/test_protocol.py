@@ -130,6 +130,7 @@ def test_encoder_rejects_bad_lengths_ports_and_versions():
     with pytest.raises(ProtocolError):
         build_portout(0, 1, b"\x01", version=3)
     assert build_portout(0, 1, b"")[24:] == bytes(24)
+    assert len(parse_light_data(build_portout(0, 1, b"\x01\x02\x03")).data) >= 24
 
 
 def test_captured_requests_rebuild_byte_for_byte():
@@ -163,6 +164,7 @@ def test_captured_requests_rebuild_byte_for_byte():
 
 def test_every_captured_reply_parses_and_fixture_table_matches():
     props: dict[int, dict[int, int]] = {}
+    supply_values: dict[int, bytes] = {}
     serials: set[int] = set()
     polls = 0
     ports = 0
@@ -184,7 +186,8 @@ def test_every_captured_reply_parses_and_fixture_table_matches():
             assert info.ip == "172.16.10.41"
             assert info.mac == "00:0a:c5:47:1f:7f"
             assert info.protocol_version == 2
-            assert info.serial_hex == "83EB007F00000000"
+            assert info.serial[:4] == bytes.fromhex("83eb007f")
+            assert info.serial_hex == "7F00EB83"
             assert info.manufacturer == "Philips Color Kinetics"
             assert info.model == "Data Enabler Pro"
             assert info.firmware_part == "SFT-000155-00"
@@ -206,6 +209,7 @@ def test_every_captured_reply_parses_and_fixture_table_matches():
             assert parsed.flag == 0x4000
             assert len(parsed.value) == 4
             assert struct.unpack_from("<HH", raw, 12)[0] == parsed.prop
+            supply_values[parsed.prop] = parsed.value
         elif header.packet_type == TYPE_FIXTURE_SCAN_REPLY:
             scans += 1
             parsed = parse_scan_reply(raw)
@@ -243,7 +247,12 @@ def test_every_captured_reply_parses_and_fixture_table_matches():
         assert props[serial][0x40] == (dmx >> 8) & 0xFF
         assert props[serial][0x41] == dmx & 0xFF
         assert props[serial][0x05] == type_code
+        assert props[serial][0x43] == props[serial][0x44] == props[serial][0x45] == 0
         assert dmx_start_zero_based(props[serial][0x40], props[serial][0x41]) == dmx
+        if type_code == 0x18:
+            assert props[serial][0x60] == props[serial][0x61] == props[serial][0x62] == 255
+        else:
+            assert 0x60 not in props[serial]
     assert format_fixture_serial(0x880055BE) == "880055BE"
     type_04 = [serial for serial, _dmx, type_code in FIXTURES if type_code == 0x04]
     type_18 = [serial for serial, _dmx, type_code in FIXTURES if type_code == 0x18]
@@ -251,6 +260,8 @@ def test_every_captured_reply_parses_and_fixture_table_matches():
     assert len(type_18) == 6
     assert 0x60 not in props[type_04[0]]
     assert props[type_18[0]][0x60] == 255
+    assert supply_values[0x0052] == bytes.fromhex("2c010000")
+    assert int.from_bytes(supply_values[0x0052], "little") == 300
 
 
 def test_parsers_reject_short_wrong_type_and_garbage():

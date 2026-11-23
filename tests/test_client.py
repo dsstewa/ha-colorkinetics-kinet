@@ -13,6 +13,7 @@ from custom_components.color_kinetics.protocol import (
     TYPE_FIXTURE_PROP,
     TYPE_FIXTURE_PROP_REPLY,
     TYPE_POLL,
+    TYPE_READ_SUPPLY_PROP,
     TYPE_SET_IP,
     TYPE_SET_NAME,
     TYPE_SET_UNIVERSE,
@@ -44,7 +45,7 @@ async def test_discovery_round_trip_accepts_replies_from_6038_and_6039(script):
     await client.start()
     try:
         info = await client.poll_supply(SUPPLY_HOST)
-        assert info.serial_hex == "83EB007F00000000"
+        assert info.serial_hex == "7F00EB83"
         ports = await client.read_ports(SUPPLY_HOST)
         assert ports.ports[0].port_id == 1
         records = await client.scan_fixtures(SUPPLY_HOST)
@@ -239,3 +240,26 @@ async def test_a_dead_socket_raises_kinet_error(script):
     with pytest.raises(KiNetError, match="ENETUNREACH"):
         await client.poll_supply(SUPPLY_HOST)
     await client.stop()
+
+
+async def test_supply_property_mismatch_is_rejected(script):
+    client = KiNetClient(prop_timeout=0.2)
+    await client.start()
+    try:
+        def wrong(data, _addr):
+            header = parse_header(data)
+            if header.packet_type != TYPE_READ_SUPPLY_PROP:
+                return []
+            reply = struct.pack(
+                "<IHHI", MAGIC, 1, 0x0106, header.sequence
+            ) + struct.pack("<HH", 0x0001, 0x4000) + b"\x00\x00\x00\x00"
+            return [(reply, 6038)]
+
+        from custom_components.color_kinetics.protocol import parse_header
+
+        for transport in script.transports:
+            transport.handler = wrong
+        with pytest.raises(ProtocolError, match="did not match"):
+            await client.read_supply_property(SUPPLY_HOST, 0x0052)
+    finally:
+        await client.stop()
