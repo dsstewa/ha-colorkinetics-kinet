@@ -129,7 +129,7 @@ async def test_discovery_creates_a_light_per_fixture_of_both_types(hass, fake_ud
     assert len(states) == 8
     button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
     assert button is not None
-    assert hass.states.get(button).state == "unknown" or hass.states.get(button) is not None
+    assert hass.states.get(button).state == "unknown"
     supply = dr.async_get(hass).async_get_device_by_identifier(
         (DOMAIN, SUPPLY_SERIAL), entry.entry_id
     )
@@ -272,8 +272,11 @@ async def test_names_and_areas_survive_rescan_and_missing_fixtures_stay(hass, fa
     assert device.area_id == area.id
     assert device.name_by_user == "Oak trunk"
     assert hass.states.get(_entity_id(hass, "light", "880055BE")).state == STATE_OFF
-    # The manual entry keeps this serial available even though the scan omitted it.
-    assert hass.states.get(_entity_id(hass, "light", "880055BE")).state != STATE_UNAVAILABLE
+    assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state == STATE_OFF
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
     assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state == STATE_UNAVAILABLE
     assert hass.states.get(_entity_id(hass, "light", "8800565C")).attributes["dmx_start"] == 30
 
@@ -312,7 +315,105 @@ async def test_missing_properties_and_partial_scan(hass, fake_udp, monkeypatch):
     )
     await hass.async_block_till_done()
     assert hass.states.get(_entity_id(hass, "light", "880055BE")).state == STATE_OFF
+    # One incomplete scan is not enough to drop a fixture.
+    assert hass.states.get(_entity_id(hass, "light", "880041E9")).state == STATE_OFF
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
     assert hass.states.get(_entity_id(hass, "light", "880041E9")).state == STATE_UNAVAILABLE
+
+
+async def test_one_missed_scan_keeps_the_color_and_the_second_marks_unavailable(
+    hass, fake_udp
+):
+    entry = await _setup(hass, _entry())
+    first = _entity_id(hass, "light", "880055BE")
+    second = _entity_id(hass, "light", "88002CD9")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": first, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": second, "rgb_color": [0, 255, 0], "brightness": 255},
+        blocking=True,
+    )
+    await _wait_light(fake_udp, lambda item: item.data[3:6] == b"\x00\xff\x00")
+    fake_udp.fixtures = [fixture for fixture in fake_udp.fixtures if fixture[0] != 0x88002CD9]
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(second).state == STATE_ON
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) > before
+        and item.data[0:3] == b"\xff\x00\x00"
+        and item.data[3:6] == b"\x00\xff\x00",
+    )
+    assert packet.data[3:6] == b"\x00\xff\x00"
+    assert len(packet.data) >= 24
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(second).state == STATE_UNAVAILABLE
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) > before
+        and item.data[0:3] == b"\xff\x00\x00"
+        and item.data[3:6] == b"\x00\xff\x00",
+    )
+    assert packet.data[3:6] == b"\x00\xff\x00"
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_manual_address_is_used_when_the_high_byte_is_missing(hass, fake_udp):
+    fake_udp.skip_props[0x880055BE] = {0x40}
+    entry = await _setup(hass, _entry(manual_fixtures="880055BE, 10"))
+    fixture = entry.runtime_data.get_fixture("880055BE")
+    assert fixture is not None
+    assert fixture.dmx_start == 9
+    assert entry.runtime_data.is_available(fixture)
+    assert hass.states.get(_entity_id(hass, "light", "880055BE")).state == STATE_OFF
+
+
+async def test_a_failed_setup_closes_the_socket(hass, fake_udp, monkeypatch):
+    entry = _entry()
+    entry.add_to_hass(hass)
+
+    async def boom(_entry, _platforms):
+        raise RuntimeError("platforms failed")
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", boom)
+    assert await hass.config_entries.async_setup(entry.entry_id) is False
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert fake_udp.transports
+    assert all(transport.closed for transport in fake_udp.transports)
+
+
+async def test_missing_high_byte_or_bad_status_leaves_the_address_unknown(
+    hass, fake_udp
+):
+    fake_udp.skip_props[0x880055BE] = {0x40}
+    fake_udp.status_overrides[(0x88002CD9, 0x40)] = 0x00
+    entry = await _setup(hass, _entry())
+    missing = entry.runtime_data.get_fixture("880055BE")
+    bad = entry.runtime_data.get_fixture("88002CD9")
+    assert missing is not None and missing.dmx_start is None
+    assert bad is not None and bad.dmx_start is None
+    assert not entry.runtime_data.is_available(missing)
+    assert not entry.runtime_data.is_available(bad)
+    assert hass.states.get(_entity_id(hass, "light", "880055BE")).state == STATE_UNAVAILABLE
+    assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state == STATE_UNAVAILABLE
 
 
 async def test_manual_fixture_fallback_and_invalid_list(hass, fake_udp):
@@ -510,7 +611,15 @@ async def test_light_edges_and_a_failed_first_scan(hass, fake_udp, monkeypatch):
     await entity.async_turn_on(brightness=0)
     assert entity.is_on is False
     await entity.async_turn_on(hs_color=(120, 100))
+    from homeassistant.util import color as color_util
+
+    expected_hs = scale_rgb(color_util.color_hs_to_RGB(120, 100), 255)
+    packet = await _wait_light(fake_udp, lambda item: item.data[0:3] == expected_hs)
+    assert packet.data[0:3] == expected_hs
     await entity.async_turn_on(xy_color=(0.3, 0.3))
+    expected_xy = scale_rgb(color_util.color_xy_to_RGB(0.3, 0.3), 255)
+    packet = await _wait_light(fake_udp, lambda item: item.data[0:3] == expected_xy)
+    assert packet.data[0:3] == expected_xy
     assert entity.is_on is True
     fake_udp.fixtures.append(fake_udp.fixtures[0])
     await hub_for_dup.async_rescan(SUPPLY_HOST)

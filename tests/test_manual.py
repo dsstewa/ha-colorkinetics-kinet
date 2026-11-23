@@ -19,7 +19,18 @@ def test_host_list_accepts_lines_commas_and_comments():
 
 @pytest.mark.parametrize(
     "text",
-    ["", "   ", "# only", "255.255.255.255", "224.0.0.1", "0.0.0.0", "name.local", "::1"],
+    [
+        "",
+        "   ",
+        "# only",
+        "255.255.255.255",
+        "224.0.0.1",
+        "0.0.0.0",
+        "172.16.10.255",
+        "192.168.1.255",
+        "name.local",
+        "::1",
+    ],
 )
 def test_host_list_rejects_empty_and_non_unicast(text):
     with pytest.raises(HostListError) as caught:

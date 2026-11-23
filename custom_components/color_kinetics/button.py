@@ -61,7 +61,7 @@ class RescanButton(ButtonEntity):
                 translation_key="scan_in_progress",
                 translation_placeholders={"host": self._host},
             ) from err
-        except KiNetError as err:
+        except (KiNetError, OSError) as err:
             self._hub._create_issue("scan_failed", self._host)
             raise HomeAssistantError(
                 f"Fixture scan of {self._host} failed. Previous fixtures were kept."

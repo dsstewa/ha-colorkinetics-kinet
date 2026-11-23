@@ -54,7 +54,6 @@ from tests.fake_kinet import (
     scan_progress,
     scan_record,
 )
-from tests.kinet_ref import dmxout, portout
 
 _OLA = [1, 5, 8, 10, 14, 45, 100, 255]
 _PACKETS = load_capture()
@@ -65,12 +64,11 @@ def _raw(packet: dict) -> bytes:
 
 
 def test_ola_golden_vectors_match_bytes_and_reference_encoder():
-    """The four OLA KiNetNodeTest vectors, and kinet_ref.py, byte for byte."""
+    """The four OLA KiNetNodeTest vectors, as literal bytes."""
     assert build_dmxout(0, bytes(_OLA)) == bytes(
         [4, 1, 0xDC, 0x4A, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0]
         + _OLA
     )
-    assert build_dmxout(0, bytes(_OLA)) == dmxout(0, _OLA)
 
     padded = bytes(_OLA) + bytes(16)
     assert build_portout(0, 7, bytes(_OLA)) == bytes(
@@ -80,38 +78,33 @@ def test_ola_golden_vectors_match_bytes_and_reference_encoder():
         ]
         + list(padded)
     )
-    assert build_portout(0, 7, bytes(_OLA)) == portout(0, 7, _OLA)
-
     full = bytes(range(1, 25))
-    assert build_portout(1, 7, full) == portout(1, 7, list(range(1, 25)))
-    assert build_portout(1, 7, full)[20:22] == b"\x18\x00"
-
+    assert build_portout(1, 7, full) == bytes(
+        [
+            4, 1, 0xDC, 0x4A, 1, 0, 8, 1, 1, 0, 0, 0,
+            255, 255, 255, 255, 7, 0, 0, 0, 24, 0, 0, 0,
+        ]
+        + list(full)
+    )
     edge = bytes([255] + [0] * 23 + [255])
-    assert build_portout(2, 255, edge) == portout(2, 255, list(edge))
-    assert len(build_portout(2, 255, edge)) == 24 + 25
+    assert build_portout(2, 255, edge) == bytes(
+        [
+            4, 1, 0xDC, 0x4A, 1, 0, 8, 1, 2, 0, 0, 0,
+            255, 255, 255, 255, 255, 0, 0, 0, 25, 0, 0, 0,
+        ]
+        + list(edge)
+    )
 
 
-def test_reference_encoder_agrees_across_versions_ports_and_lengths():
-    samples = [
-        bytes(_OLA),
-        bytes(range(1, 25)),
-        bytes([255] + [0] * 23 + [255]),
-        bytes([7]),
-        b"",
-        bytes(range(256)) * 2,
-    ]
-    for sequence in (0, 1, 2, 1000):
-        for port in (1, 7, 255):
-            for version in (1, 2):
-                for flags in (0, 0x0004):
-                    for data in samples:
-                        assert build_portout(
-                            sequence, port, data, flags=flags, version=version
-                        ) == portout(sequence, port, data, flags=flags, ver=version)
-        for data in samples:
-            if not data or len(data) > 512:
-                continue
-            assert build_dmxout(sequence, data) == dmxout(sequence, data)
+def test_portout_version_two_is_the_ola_packet_with_a_different_version_field():
+    """Haukcode's header version is not a second encoder. Only bytes 4-5 change."""
+    ola = build_portout(0, 7, bytes(_OLA), version=1)
+    hauk = build_portout(0, 7, bytes(_OLA), version=2)
+    assert ola[:4] == hauk[:4] == bytes([4, 1, 0xDC, 0x4A])
+    assert ola[4:6] == b"\x01\x00"
+    assert hauk[4:6] == b"\x02\x00"
+    assert ola[6:] == hauk[6:]
+    assert hauk[6:8] == b"\x08\x01"
 
 
 def test_portout_version_field_is_the_only_difference_between_ola_and_haukcode():
@@ -347,17 +340,27 @@ def test_parsers_reject_short_wrong_type_and_garbage():
         parse_light_data(build_poll(1))
 
 
-def test_dmx_address_handles_a_missing_high_byte_and_a_missing_low_byte():
+def test_dmx_address_requires_both_bytes():
     assert dmx_start_zero_based(None, None) is None
     assert dmx_start_zero_based(1, None) is None
-    assert dmx_start_zero_based(None, 21) == 21
+    assert dmx_start_zero_based(None, 21) is None
     assert dmx_start_zero_based(1, 2) == 258
 
 
 def test_unicast_guard_rejects_broadcast_multicast_and_garbage():
     assert assert_unicast_host("172.16.10.41") == "172.16.10.41"
     assert assert_unicast_host(" 127.0.0.1 ") == "127.0.0.1"
-    for host in ("255.255.255.255", "224.0.0.1", "0.0.0.0"):
+    for host in (
+        "255.255.255.255",
+        "224.0.0.1",
+        "0.0.0.0",
+        "172.16.10.255",
+        "172.16.10.0",
+        "192.168.1.255",
+        "10.255.255.255",
+        "172.16.255.255",
+        "169.254.255.255",
+    ):
         with pytest.raises(BroadcastNotAllowedError):
             assert_unicast_host(host)
     for host in ("not-an-ip", "172.16.10.41.2", "::1", ""):

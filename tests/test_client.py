@@ -10,6 +10,7 @@ import pytest
 from custom_components.color_kinetics.protocol import (
     MAGIC,
     TYPE_DMXOUT,
+    TYPE_FIXTURE_PROP,
     TYPE_FIXTURE_PROP_REPLY,
     TYPE_POLL,
     TYPE_SET_IP,
@@ -56,16 +57,11 @@ async def test_discovery_round_trip_accepts_replies_from_6038_and_6039(script):
     finally:
         await client.stop()
 
-    ports_used = set()
-    for transport in script.transports:
-        for _data, _addr in transport.sent:
-            pass
-    # The script returns scan and property replies tagged with source port 6039.
-    # Re-read what the handler emitted by checking the client accepted them above.
-    assert any(packet[0][6:8] == b"\x08\x02" for packet in script.sent) or serials
+    assert 6038 in script.reply_ports
+    assert 6039 in script.reply_ports
     probed = await async_probe_host(SUPPLY_HOST, timeout=1)
     assert probed.label == "Data Enabler Pro"
-    assert ports_used == set()
+    assert probed.ip == "172.16.10.41"
 
 
 async def test_send_refuses_writes_broadcast_and_a_closed_client(script):
@@ -136,38 +132,24 @@ async def test_timeouts_partial_scan_and_a_mismatched_property(monkeypatch):
         with pytest.raises(KiNetTimeoutError):
             await client.scan_fixtures(SUPPLY_HOST)
 
+        from custom_components.color_kinetics.protocol import parse_header
+
         def wrong_serial(data, addr):
             script.sent.append((data, addr))
-            header = __import__(
-                "custom_components.color_kinetics.protocol", fromlist=["parse_header"]
-            ).parse_header(data)
-            reply = struct.pack("<IHHI", MAGIC, 1, TYPE_FIXTURE_PROP_REPLY, header.sequence)
-            reply += struct.pack("<IHBB", 0x11111111, 0x41, 1, 0x09)
+            header = parse_header(data)
+            if header.packet_type != TYPE_FIXTURE_PROP:
+                return []
+            reply = struct.pack(
+                "<IHHI", MAGIC, 1, TYPE_FIXTURE_PROP_REPLY, header.sequence
+            ) + struct.pack("<IHBB", 0x11111111, 0x41, 1, 0x09)
             return [(reply, 6039)]
 
-        script_handler = script
-
-        class Wrapper:
-            transports: list = []
-
-            def __call__(self, data, addr):
-                return wrong_serial(data, addr)
-
-        # The installed handler is still ``script``. Swap the reply by drop + custom.
-        packet = build_fixture_property_read(client.allocate_sequence(), FIXTURES[0][0], 0x41)
-
-        async def fake_request(*_args, **_kwargs):
-            return struct.pack("<IHHI", MAGIC, 1, TYPE_FIXTURE_PROP_REPLY, 1) + struct.pack(
-                "<IHBB", 0x11111111, 0x41, 1, 0x09
-            )
-
-        client.request = fake_request  # type: ignore[method-assign]
-        with pytest.raises(ProtocolError):
+        for transport in script.transports:
+            transport.handler = wrong_serial
+        with pytest.raises(ProtocolError, match="did not match"):
             await client.read_fixture_property(SUPPLY_HOST, FIXTURES[0][0], 0x41)
-        assert packet[0:4] == MAGIC.to_bytes(4, "little")
     finally:
         await client.stop()
-    assert script_handler is script
 
 
 async def test_dispatch_ignores_garbage_and_a_raising_listener(script):
@@ -224,7 +206,7 @@ async def test_request_cancel_scan_filter_and_a_finished_waiter(script):
             transport.handler = mixed
         script_handler.finish_scan = True
         records = await client.scan_fixtures(SUPPLY_HOST)
-        assert records == [] or all(record.serial is None for record in records)
+        assert records == []
     finally:
         await client.stop()
 
@@ -242,3 +224,18 @@ async def test_stop_cancels_an_outstanding_request(script):
     with pytest.raises((KiNetTimeoutError, asyncio.CancelledError)):
         await client.poll_supply(SUPPLY_HOST)
     await task
+
+
+async def test_a_dead_socket_raises_kinet_error(script):
+    client = KiNetClient()
+    await client.start()
+    transport = client.transport
+    assert transport is not None
+
+    def dead(_data: bytes, _addr: tuple | None = None) -> None:
+        raise OSError("ENETUNREACH")
+
+    transport.sendto = dead  # type: ignore[method-assign]
+    with pytest.raises(KiNetError, match="ENETUNREACH"):
+        await client.poll_supply(SUPPLY_HOST)
+    await client.stop()

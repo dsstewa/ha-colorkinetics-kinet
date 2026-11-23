@@ -139,9 +139,11 @@ class SupplyScript:
         self.fixtures = list(FIXTURES if fixtures is None else fixtures)
         self.drop_types: set[int] = set()
         self.skip_props: dict[int, set[int]] = {}
+        self.status_overrides: dict[tuple[int, int], int] = {}
         self.limit: int | None = None
         self.finish_scan = True
         self.sent: list[tuple[bytes, tuple]] = []
+        self.reply_ports: list[int] = []
         self.transports: list[FakeTransport] = []
 
     def prop_value(self, serial: int, prop: int) -> int | None:
@@ -160,6 +162,12 @@ class SupplyScript:
 
     def __call__(self, data: bytes, addr: tuple) -> list[tuple[bytes, int]]:
         self.sent.append((data, addr))
+        replies = self._replies(data)
+        for _reply, port in replies:
+            self.reply_ports.append(port)
+        return replies
+
+    def _replies(self, data: bytes) -> list[tuple[bytes, int]]:
         header = parse_header(data)
         if header.packet_type in self.drop_types:
             return []
@@ -175,7 +183,10 @@ class SupplyScript:
             value = self.prop_value(serial, prop)
             if value is None:
                 return []
-            return [(fixture_property_reply(sequence, serial, prop, value), 6039)]
+            status = self.status_overrides.get((serial, prop), 0x09)
+            return [
+                (fixture_property_reply(sequence, serial, prop, value, status=status), 6039)
+            ]
         return []
 
     def _scan_replies(self, sequence: int) -> list[tuple[bytes, int]]:

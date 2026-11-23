@@ -79,6 +79,7 @@ class FixtureLight(RestoreEntity, LightEntity):
 
     _attr_supported_color_modes = {ColorMode.RGB}
     _attr_color_mode = ColorMode.RGB
+    _attr_assumed_state = True
     _attr_has_entity_name = True
     _attr_name = None
     _attr_should_poll = False
@@ -184,7 +185,9 @@ class FixtureLight(RestoreEntity, LightEntity):
             return
         if fixture.host not in self._hub.hosts:
             return
-        if self._hub.is_available(fixture) and self._attr_is_on:
+        if not self._hub.is_available(fixture):
+            return
+        if self._attr_is_on:
             payload = self._channels()
         else:
             payload = bytes(_CHANNELS)

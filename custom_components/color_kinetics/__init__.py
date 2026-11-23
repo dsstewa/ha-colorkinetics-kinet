@@ -13,15 +13,21 @@ async def async_setup_entry(
 ) -> bool:
     """Connect to the configured Data Enablers and expose their fixtures."""
     hub = ColorKineticsHub(hass, entry)
-    await hub.async_start()
-    entry.runtime_data = hub
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
-    hub.initial_task = entry.async_create_background_task(
-        hass,
-        hub.async_initial_refresh(),
-        "color_kinetics refresh",
-    )
+    try:
+        await hub.async_start()
+        entry.runtime_data = hub
+        # Unload (including a failed setup) closes the socket and the frame task.
+        entry.async_on_unload(hub.async_stop)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+        hub.initial_task = entry.async_create_background_task(
+            hass,
+            hub.async_initial_refresh(),
+            "color_kinetics refresh",
+        )
+    except Exception:
+        await hub.async_stop()
+        raise
     return True
 
 

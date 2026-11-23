@@ -218,6 +218,45 @@ async def test_options_flow_updates_protocol_manual_fixtures_and_hosts(hass, pro
     assert entry.options[CONF_HOSTS] == ["172.16.10.41", "172.16.10.42"]
 
 
+async def test_replacing_the_supply_frees_its_serial_for_a_new_entry(hass, probes):
+    created = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    created = await hass.config_entries.flow.async_configure(
+        created["flow_id"], {CONF_HOSTS: "172.16.10.41"}
+    )
+    assert created["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    entry = created["result"]
+    assert entry.unique_id == "83EB007F00000000"
+
+    options = await hass.config_entries.options.async_init(entry.entry_id)
+    saved = await hass.config_entries.options.async_configure(
+        options["flow_id"],
+        {
+            CONF_HOSTS: "172.16.10.42",
+            CONF_PROTOCOL: "portout",
+            CONF_PORTOUT_VERSION: "1",
+            CONF_OUTPUT_PORT: 1,
+            CONF_MANUAL_FIXTURES: "",
+        },
+    )
+    assert saved["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.unique_id == "1111111100000000"
+    assert "172.16.10.42" in entry.title
+
+    again = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    reused = await hass.config_entries.flow.async_configure(
+        again["flow_id"], {CONF_HOSTS: "172.16.10.41"}
+    )
+    assert reused["type"] is FlowResultType.CREATE_ENTRY
+    assert reused["result"].unique_id == "83EB007F00000000"
+    await hass.async_block_till_done()
+
+
 async def test_options_flow_rejects_a_host_owned_by_another_entry(hass, probes):
     first = MockConfigEntry(
         domain=DOMAIN,

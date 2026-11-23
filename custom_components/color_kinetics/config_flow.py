@@ -200,6 +200,12 @@ class ColorKineticsOptionsFlow(OptionsFlow):
                 errors["base"] = "cannot_connect"
                 placeholders["host"] = getattr(err, "host", "") or ""
             else:
+                serial = options[CONF_SUPPLIES][options[CONF_HOSTS][0]]["serial_hex"]
+                self.hass.config_entries.async_update_entry(
+                    entry,
+                    unique_id=serial,
+                    title=_title(options[CONF_SUPPLIES], options[CONF_HOSTS]),
+                )
                 return self.async_create_entry(title="", data=options)
         current = self._suggested()
         return self.async_show_form(

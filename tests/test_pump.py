@@ -67,20 +67,66 @@ def test_two_hosts_are_independent_and_forget_stops_keepalive():
     assert any(host == "a" for host, _time in sent[2:])
 
 
-def test_a_failed_or_empty_send_does_not_spin_or_arm_keepalive():
+def test_a_send_that_writes_nothing_does_not_start_keepalive():
     clock = {"t": 0.0}
     sent: list[tuple[str, float]] = []
     pump = _pump(clock, sent, result=False)
     pump.mark_dirty("h")
     pump.flush()
     assert sent == [("h", 0.0)]
+    assert "h" not in pump._armed
+    assert pump._dirty["h"] is False
     assert pump.seconds_until_due() == pytest.approx(1.0)
+    clock["t"] = 10.0
+    pump.flush()
+    assert sent == [("h", 0.0)]
 
-    boom = _pump(clock, sent, boom=True)
-    boom.mark_dirty("h")
-    boom.flush()
-    clock["t"] = 10
-    boom.flush()
+
+def test_a_failed_send_advances_the_attempt_time_and_backs_off():
+    clock = {"t": 0.0}
+    sent: list[tuple[str, float]] = []
+    pump = _pump(clock, sent, min_interval=0.025, keepalive=1.0)
+    pump.mark_dirty("h")
+    pump.flush()
+    assert sent == [("h", 0.0)]
+
+    failing = _pump(clock, sent, min_interval=0.025, keepalive=1.0, boom=True)
+    failing.mark_dirty("h")
+    failing.flush()
+    assert failing._last["h"] == 0.0
+    assert failing._failures["h"] == 1
+    clock["t"] = 0.5
+    failing.flush()
+    assert failing._failures["h"] == 1
+    clock["t"] = 1.0
+    failing.flush()
+    assert failing._failures["h"] == 2
+    assert failing.seconds_until_due() == pytest.approx(2.0)
+
+
+async def test_failing_keepalive_yields_and_stays_bounded():
+    """A send that raises after the first success must not busy-loop."""
+    import time
+
+    times: list[float] = []
+
+    def send(_host: str) -> bool:
+        times.append(time.monotonic())
+        if len(times) > 1:
+            raise OSError(101, "ENETUNREACH")
+        return True
+
+    pump = FramePump(min_interval=0.02, keepalive=0.05, send=send)
+    pump.mark_dirty("172.16.10.41")
+    pump.start()
+    try:
+        await asyncio.sleep(0.4)
+    finally:
+        await pump.stop()
+    assert 2 <= len(times) <= 8
+    gaps = [later - earlier for earlier, later in zip(times, times[1:])]
+    assert gaps
+    assert min(gaps) >= 0.04
 
 
 async def test_start_is_idempotent_and_stop_is_safe_before_start():

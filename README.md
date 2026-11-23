@@ -17,7 +17,7 @@ Outgoing datagrams are checked against an allow-list before they hit the socket:
 | Fixture scan | `0x0207` |
 | Light data | `0x0101` DMXOUT or `0x0108` PORTOUT |
 
-Set-IP (`0x0003`), set-universe (`0x0005`), set-name (`0x0006`), write-properties (`0x0103`), sync/discover-v2 (`0x0109`), and every other type are rejected in code. Light data is **unicast only**. The integration never broadcasts.
+Set-IP (`0x0003`), set-universe (`0x0005`), set-name (`0x0006`), write-properties (`0x0103`), sync/discover-v2 (`0x0109`), and every other type are rejected in code. Light data is **unicast only**. Limited broadcast, multicast, and addresses whose last octet is 0 or 255 (a directed broadcast on a normal LAN) are rejected.
 
 ## Install (HACS custom repository)
 
@@ -34,8 +34,8 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 - One device per Data Enabler (model, firmware, MAC) and a **Rescan fixtures** button on it.
 - One device and one `light` per fixture, keyed by serial (`880055BE`, …). Renames and areas stick across restarts and rescans.
 - RGB color and brightness (`ColorMode.RGB`). State is optimistic and restored after a restart.
-- Two fixture type codes from this rig (`0x18` and `0x04`) show up as the device model (`Type 0x18`, `Type 0x04`). A fixture that does not answer a property is still created; a missing DMX address makes that light unavailable instead of guessing.
-- Fixtures that disappear on a later scan stay in the registry as **unavailable**. They are not deleted.
+- Two fixture type codes from this rig (`0x18` and `0x04`) show up as the device model (`Type 0x18`, `Type 0x04`). A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
+- A fixture has to be missing from two scans in a row before it becomes unavailable. Its last channel values stay in the frame. It is not deleted.
 - Light frames go out on change, at most 40 per second, and the last frame is repeated about once a second so the Data Enabler keeps holding the color.
 
 A scan takes about 14 seconds. It runs once per supply that has never completed a scan, and when you press the button. It is not polled.

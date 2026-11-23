@@ -77,6 +77,7 @@ class Fixture:
     present: bool
     source: str
     properties: dict[int, int]
+    miss_count: int = 0
 
     @property
     def display_name(self) -> str:
@@ -107,6 +108,7 @@ def _fixture_from_dict(raw: dict[str, Any]) -> Fixture:
         present=bool(raw.get("present", True)),
         source=str(raw.get("source") or "discovery"),
         properties=properties,
+        miss_count=int(raw.get("miss_count") or 0),
     )
 
 
@@ -121,6 +123,7 @@ def _fixture_to_dict(fixture: Fixture) -> dict[str, Any]:
         "type_code": fixture.type_code,
         "present": fixture.present,
         "source": source,
+        "miss_count": fixture.miss_count,
         "properties": {str(key): value for key, value in fixture.properties.items()},
     }
 
@@ -150,6 +153,7 @@ class ColorKineticsHub:
         self._listeners: list[Listener] = []
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
+        self._stopped = False
         self.initial_task: asyncio.Task[None] | None = None
         self.last_error: Exception | None = None
 
@@ -229,7 +233,11 @@ class ColorKineticsHub:
         self.pump.start()
 
     async def async_stop(self) -> None:
-        """Stop sending and close the socket."""
+        """Stop sending, close the socket, and drop repair issues. Idempotent."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._clear_issues()
         await self.pump.stop()
         await self._save()
         await self.client.stop()
@@ -240,7 +248,7 @@ class ColorKineticsHub:
             for host in list(self.hosts):
                 try:
                     await self._poll(host)
-                except KiNetError as err:
+                except (KiNetError, OSError) as err:
                     _LOGGER.warning("Data Enabler %s did not answer: %s", host, err)
                     self._create_issue("supply_unreachable", host)
                     continue
@@ -251,7 +259,7 @@ class ColorKineticsHub:
                     await self.async_rescan(host)
                 except ScanInProgressError:
                     _LOGGER.debug("Scan already running on %s", host)
-                except KiNetError as err:
+                except (KiNetError, OSError) as err:
                     _LOGGER.warning("Fixture scan failed for %s: %s", host, err)
                     self._create_issue("scan_failed", host)
         except Exception as err:  # noqa: BLE001 - keep the background task quiet
@@ -304,6 +312,14 @@ class ColorKineticsHub:
                     prop,
                 )
                 continue
+            if reply.status != 0x09:
+                _LOGGER.debug(
+                    "Fixture %s property %#04x status %#04x is not usable",
+                    format_fixture_serial(serial),
+                    prop,
+                    reply.status,
+                )
+                continue
             found[prop] = reply.value
         return found
 
@@ -325,7 +341,12 @@ class ColorKineticsHub:
         serials: list[int],
         properties: dict[int, dict[int, int]],
     ) -> None:
-        old_span = self._span.get(host, 0)
+        """Apply one scan. A fixture is dropped only after two scans miss it.
+
+        The frame buffer is not cleared. A fixture that is still present
+        rewrites its own slots; one that is merely missing keeps the bytes
+        it last sent, so a lost reply cannot black out the run.
+        """
         seen: set[str] = set()
         for serial in serials:
             key = format_fixture_serial(serial)
@@ -342,20 +363,23 @@ class ColorKineticsHub:
                 present=True,
                 source="discovery",
                 properties=dict(props),
+                miss_count=0,
             )
         for key, fixture in list(self._fixtures.items()):
             if fixture.host != host or fixture.source == "manual" or key in seen:
                 continue
             if fixture.serial_hex is None:
                 continue
-            self._fixtures[key] = replace(fixture, present=False)
+            misses = fixture.miss_count + 1
+            self._fixtures[key] = replace(
+                fixture,
+                miss_count=misses,
+                present=misses < 2,
+            )
         self._merge_manual()
         self._register_fixture_devices()
-        self._buffers[host] = bytearray(DMX_SLOTS)
-        self._span[host] = 0
         self._notify()
-        self._span[host] = max(self._span.get(host, 0), old_span)
-        if self._span.get(host, 0):
+        if self._fixture_span(host):
             self.pump.mark_dirty(host)
         _LOGGER.info("Fixture scan of %s found %s fixture(s)", host, len(seen))
 
@@ -551,6 +575,14 @@ class ColorKineticsHub:
             }
             if identifiers and identifiers.isdisjoint(keep_devices):
                 device_registry.async_remove_device(device.id)
+
+    def _clear_issues(self) -> None:
+        """Remove repair issues for every supply this entry has talked to."""
+        hosts = set(self.hosts)
+        hosts.update(self._supplies)
+        for host in hosts:
+            self._delete_issue("supply_unreachable", host)
+            self._delete_issue("scan_failed", host)
 
     def _issue_id(self, kind: str, host: str) -> str:
         return f"{kind}_{host.replace('.', '_')}"

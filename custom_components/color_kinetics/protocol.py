@@ -223,9 +223,12 @@ class LightData:
 def assert_unicast_host(host: str) -> str:
     """Return ``host`` when it is an IPv4 unicast address.
 
-    Limited broadcast, multicast, and 0.0.0.0 are rejected. Loopback is
-    allowed so tests can bind locally. Directed-broadcast detection needs
-    the subnet mask, which this integration does not have.
+    Limited broadcast, multicast, and 0.0.0.0 are rejected. So is any
+    address whose last octet is 0 or 255: on a normal LAN those are the
+    network and directed-broadcast addresses, and ``SO_BROADCAST`` is not
+    required for ``sendto`` to accept them. Loopback is allowed so tests
+    can bind locally. A /31 or /32 where .0 or .255 is a real host is not
+    distinguishable without the mask, so those addresses are rejected too.
     """
     try:
         address = ipaddress.ip_address(host.strip())
@@ -233,10 +236,12 @@ def assert_unicast_host(host: str) -> str:
         raise InvalidHostError(host) from err
     if not isinstance(address, ipaddress.IPv4Address):
         raise InvalidHostError(host)
+    last_octet = int(address) & 0xFF
     if (
         address == _LIMITED_BROADCAST
         or address.is_multicast
         or address.is_unspecified
+        or last_octet in (0, 255)
     ):
         raise BroadcastNotAllowedError(host)
     return str(address)
@@ -492,17 +497,19 @@ def parse_light_data(data: bytes) -> LightData:
     raise ProtocolError("not a light-data packet")
 
 
+# Every captured 0x0204 used status 0x09. Anything else is not a usable value.
+PROPERTY_STATUS_OK = 0x09
+
+
 def dmx_start_zero_based(high: int | None, low: int | None) -> int | None:
     """Combine fixture properties 0x40 and 0x41 into a 0-based DMX slot.
 
-    The high byte is optional: when a fixture does not answer 0x40 the
-    address is treated as the low byte alone (every captured fixture is
-    below 256). The low byte is required.
+    Both bytes are required. A missing high byte is not treated as 0: that
+    would aim a fixture at the wrong address when the read times out.
     """
-    if low is None:
+    if high is None or low is None:
         return None
-    high_byte = 0 if high is None else high & 0xFF
-    return (high_byte << 8) | (low & 0xFF)
+    return ((high & 0xFF) << 8) | (low & 0xFF)
 
 
 def supply_entry_dict(info: SupplyInfo) -> dict[str, Any]:
@@ -617,7 +624,10 @@ class KiNetClient:
             KINET_PORT,
             len(packet),
         )
-        transport.sendto(packet, (destination, KINET_PORT))  # type: ignore[attr-defined]
+        try:
+            transport.sendto(packet, (destination, KINET_PORT))  # type: ignore[attr-defined]
+        except OSError as err:
+            raise KiNetError(f"KiNET send to {destination} failed: {err}") from err
 
     def add_packet_listener(self, listener: PacketListener) -> Callable[[], None]:
         """Register a callback invoked for every decoded reply."""
