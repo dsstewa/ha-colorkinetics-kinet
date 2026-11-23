@@ -50,3 +50,16 @@ def apply_submitted_order(
         result.insert(min(index, len(result)), serial)
         seen.add(serial)
     return effective_order(result, discovered)
+
+
+def merge_group_members(
+    saved: list[str], submitted: list[str], on_form: set[str]
+) -> list[str]:
+    """Keep serials the form could not show, in their previous slots.
+
+    ``submitted`` is the user's order of the fixtures that were on the form
+    and still selected. A serial that was saved but had no light entity is
+    not on the form, so a rename or a no-op save must not drop it.
+    """
+    hidden = [serial for serial in saved if serial not in on_form]
+    return apply_submitted_order(hidden, submitted, [])

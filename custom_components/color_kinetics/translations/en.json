@@ -82,7 +82,9 @@
       "no_hosts": "Leave at least one Data Enabler address.",
       "already_configured": "One of these Data Enablers is already configured on another entry.",
       "invalid_manual": "{detail}",
-      "invalid_group": "Enter a name for the group."
+      "invalid_group": "Enter a name for the group.",
+      "duplicate_group": "A group with this name already exists.",
+      "group_members": "Choose at least one fixture."
     }
   },
   "entity": {
@@ -145,6 +147,12 @@
       "options": {
         "1": "1 (01 00, OLA)",
         "2": "2 (02 00, Haukcode)"
+      }
+    },
+    "group_action": {
+      "options": {
+        "add": "Add group",
+        "done": "Done"
       }
     }
   }

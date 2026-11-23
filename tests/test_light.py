@@ -684,11 +684,11 @@ async def test_scan_in_progress_during_refresh_is_ignored(hass, fake_udp):
 
 
 def _offsets(data: bytes, payload: bytes, *, skip: int | None = None) -> None:
+    """Check every discovered fixture. ``skip`` is left alone: it must not be required to be zero."""
     for _serial, start, _type_code in FIXTURES:
         if start == skip:
-            assert data[start : start + 3] == b"\x00\x00\x00"
-        else:
-            assert data[start : start + 3] == payload
+            continue
+        assert data[start : start + 3] == payload
 
 
 async def test_all_fixtures_paints_every_fixture_in_one_frame(hass, fake_udp):
@@ -846,3 +846,76 @@ async def test_offline_88005b93_stays_until_a_second_scan_misses_it(hass, fake_u
     assert hass.states.get(_entity_id(hass, "sensor", "88005B93:dmx_address")).state == (
         STATE_UNAVAILABLE
     )
+
+
+async def test_reload_keeps_the_color_of_an_unavailable_fixture(hass, fake_udp):
+    """A reload must not paint 00 00 00 over a fixture that missed two scans."""
+    entry = await _setup(hass, _entry())
+    entity_id = _entity_id(hass, "light", "88002CD9")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": entity_id, "rgb_color": [0, 255, 0], "brightness": 255},
+        blocking=True,
+    )
+    await _wait_light(fake_udp, lambda item: item.data[3:6] == b"\x00\xff\x00")
+    fake_udp.fixtures = [fixture for fixture in fake_udp.fixtures if fixture[0] != 0x88002CD9]
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    before = len(_light_packets(fake_udp))
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await _settle(hass, entry)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) > before
+        and item.data[3:6] == b"\x00\xff\x00",
+    )
+    assert packet.data[3:6] == b"\x00\xff\x00"
+
+
+async def test_short_frame_does_not_zero_pad_an_unset_fixture(hass, fake_udp):
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    hub._saved_channels.clear()
+    hub._span[SUPPLY_HOST] = 3
+    hub._buffers[SUPPLY_HOST] = bytearray(512)
+    hub._buffers[SUPPLY_HOST][0:3] = b"\xff\x00\x00"
+    before = len(_light_packets(fake_udp))
+    assert hub._transmit(SUPPLY_HOST) is True
+    packet = _light_packets(fake_udp)[-1][0]
+    assert len(_light_packets(fake_udp)) == before + 1
+    assert packet.data == b"\xff\x00\x00"
+    hub._saved_channels.clear()
+    hub._span[SUPPLY_HOST] = 0
+    hub._buffers[SUPPLY_HOST] = bytearray(512)
+    assert hub._transmit(SUPPLY_HOST) is False
+    from dataclasses import replace
+
+    for key, fixture in list(hub._fixtures.items()):
+        hub._fixtures[key] = replace(fixture, dmx_start=None)
+    assert hub._pad_would_zero_unset(SUPPLY_HOST, 3) is False
+    hub._load_cache({"channels": {"880055BE": 1, "88002CD9": "zz"}, "fixtures": {}})
+    hub._saved_channels["missing"] = b"\x01\x02\x03"
+    hub._restore_saved_channels()
+
+
+async def test_address_reread_timeout_keeps_the_previous_start(hass, fake_udp):
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    fixture = hub.get_fixture("880055BE")
+    assert fixture is not None and fixture.dmx_start == 0
+    previous_low = fixture.properties.get(0x40)
+    fake_udp.skip_props[0x880055BE] = {0x40, 0x05}
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call("button", "press", {"entity_id": button}, blocking=True)
+    await hass.async_block_till_done()
+    updated = hub.get_fixture("880055BE")
+    assert updated is not None
+    assert updated.dmx_start == 0
+    assert updated.properties.get(0x40) == previous_low
+    assert updated.type_code == fixture.type_code
+    assert hub.is_available(updated)

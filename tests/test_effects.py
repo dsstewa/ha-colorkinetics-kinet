@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from homeassistant.const import STATE_ON, STATE_UNAVAILABLE
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 
 from custom_components.color_kinetics.const import CONF_FIXTURE_ORDER, CONF_GROUPS, DOMAIN
 from custom_components.color_kinetics.effects import (
@@ -75,6 +75,11 @@ def test_effect_frames_are_deterministic():
         "C",
         "D",
     ]
+    from custom_components.color_kinetics.order import merge_group_members
+
+    assert merge_group_members(
+        ["880055BE", "DEADBEEF", "88002CD9"], ["88002CD9"], {"880055BE", "88002CD9"}
+    ) == ["DEADBEEF", "88002CD9"]
     engine = EffectEngine()
     engine.start("all", EFFECT_SOLID, ["A"], (255, 0, 0), 255, 5)
     assert engine.active is False
@@ -164,6 +169,8 @@ async def test_effects_follow_order_and_a_manual_color_wins(hass, fake_udp):
     )
     assert hub.effect_speed(hub.all_fixtures_owner(SUPPLY_HOST)) == 1
     assert hass.states.get(group).state == STATE_ON
+    speed_id = _entity_id(hass, "number", f"{SUPPLY_SERIAL}:all_fixtures:effect_speed")
+    assert speed_id is not None and speed_id.endswith("_effect_speed")
     await asyncio.sleep(0.05)
     hub.effects.stop(hub.all_fixtures_owner(SUPPLY_HOST))
     await asyncio.sleep(0.05)
@@ -205,6 +212,13 @@ async def test_group_effect_takes_fixtures_and_skips_unavailable(hass, fake_udp,
     assert data[0:3] == b"\x00\xff\x00"
     assert data[3:6] == b"\x00\x00\x00"
     assert data[6:9] == b"\x00\x00\x00"
+    assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state != STATE_ON
+    from homeassistant.components.light import DATA_COMPONENT
+
+    member = hass.data[DATA_COMPONENT].get_entity(_entity_id(hass, "light", "88002CD9"))
+    before_push = bytes(entry.runtime_data._buffers[SUPPLY_HOST][3:6])
+    member.apply_fixture_update()
+    assert bytes(entry.runtime_data._buffers[SUPPLY_HOST][3:6]) == before_push
     await hass.services.async_call(
         "light",
         "turn_on",
@@ -216,9 +230,51 @@ async def test_group_effect_takes_fixtures_and_skips_unavailable(hass, fake_udp,
     assert packet.data[3:6] == b"\xff\x00\x00"
     assert packet.data[6:9] == b"\x00\x00\x00"
     assert entry.runtime_data.effects.active is False
+
+
+async def test_a_stolen_group_reports_off_and_turn_off_does_not_zero(hass, fake_udp, monkeypatch):
+    entry = await _setup(
+        hass,
+        _entry(
+            **{
+                CONF_GROUPS: [
+                    {"id": "oaks", "name": "Oaks", "members": ["880055BE", "88002CD9"]},
+                    {"id": "pines", "name": "Pines", "members": ["880055BE", "88002CD9"]},
+                ]
+            }
+        ),
+    )
+    oaks = _entity_id(hass, "light", "group:oaks")
+    pines = _entity_id(hass, "light", "group:pines")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": oaks, "effect": EFFECT_COLOR_WHEEL},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": pines, "effect": EFFECT_COLOR_CHASE, "rgb_color": [0, 0, 255]},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(oaks).state == STATE_OFF
+    assert hass.states.get(oaks).attributes.get("effect") is None
+    from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
+
+    assert hass.data[LIGHT_DATA].get_entity(oaks)._attr_effect == EFFECT_SOLID
+    hub = entry.runtime_data
+    assert hub.effects.owners["880055BE"] == "group:pines"
+    before = bytes(hub._buffers[SUPPLY_HOST][0:6])
+    await hass.services.async_call(
+        "light", "turn_off", {"entity_id": oaks}, blocking=True
+    )
+    assert bytes(hub._buffers[SUPPLY_HOST][0:6]) == before
+    assert hub.effects.owners["880055BE"] == "group:pines"
     from homeassistant.components.light import DATA_COMPONENT
 
-    group_entity = hass.data[DATA_COMPONENT].get_entity(group)
+    group_entity = hass.data[DATA_COMPONENT].get_entity(oaks)
     group_entity._group_id = "missing"
     assert group_entity._candidate_keys() == []
     group_entity.publish()
@@ -241,7 +297,14 @@ async def test_group_effect_takes_fixtures_and_skips_unavailable(hass, fake_udp,
 
     hass.config_entries.async_update_entry(
         entry,
-        options={**entry.options, "groups": ["nope", {"name": "Nameless"}]},
+        options={
+            **entry.options,
+            "groups": [
+                "nope",
+                {"name": "Nameless"},
+                {"id": "empty", "name": "Empty", "members": []},
+            ],
+        },
     )
     await hass.async_block_till_done()
     hub = entry.runtime_data

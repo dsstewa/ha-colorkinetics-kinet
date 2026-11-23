@@ -57,6 +57,7 @@ from .properties import (
 )
 from .protocol import (
     DMX_SLOTS,
+    PORTOUT_MIN_DATA,
     KiNetClient,
     KiNetError,
     SupplyInfo,
@@ -168,6 +169,7 @@ class ColorKineticsHub:
         self._scanned_hosts: set[str] = set()
         self._buffers: dict[str, bytearray] = {}
         self._span: dict[str, int] = {}
+        self._saved_channels: dict[str, bytes] = {}
         self._listeners: list[Listener] = []
         self._light_listeners: list[Listener] = []
         self.effects = EffectEngine()
@@ -265,6 +267,8 @@ class ColorKineticsHub:
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
             members = [str(serial) for serial in raw.get("members") or []]
+            if not members:
+                continue
             groups.append(
                 {"id": str(raw["id"]), "name": str(raw.get("name") or "Group"), "members": members}
             )
@@ -416,6 +420,7 @@ class ColorKineticsHub:
         stored = await self._store.async_load()
         self._load_cache(stored or {})
         self._merge_manual()
+        self._restore_saved_channels()
         self._register_supply_devices()
         self._drop_stale_registry_entries()
         self.pump.start()
@@ -580,16 +585,29 @@ class ColorKineticsHub:
             seen.add(key)
             props = properties.get(serial, {})
             previous = self._fixtures.get(key)
+            merged = dict(previous.properties) if previous else {}
+            merged.update(props)
+            dmx_start = dmx_start_zero_based(props.get(0x40), props.get(0x41))
+            if (
+                dmx_start is None
+                and previous is not None
+                and previous.dmx_start is not None
+                and (0x40 not in props or 0x41 not in props)
+            ):
+                dmx_start = previous.dmx_start
+            type_code = props.get(0x05)
+            if type_code is None and previous is not None:
+                type_code = previous.type_code
             self._fixtures[key] = Fixture(
                 key=key,
                 host=host,
                 serial_hex=key,
                 label=previous.label if previous else None,
-                dmx_start=dmx_start_zero_based(props.get(0x40), props.get(0x41)),
-                type_code=props.get(0x05),
+                dmx_start=dmx_start,
+                type_code=type_code,
                 present=True,
                 source="discovery",
-                properties=dict(props),
+                properties=merged,
                 miss_count=0,
             )
         for key, fixture in list(self._fixtures.items()):
@@ -606,7 +624,7 @@ class ColorKineticsHub:
         self._merge_manual()
         self._register_fixture_devices()
         self._notify()
-        if self._fixture_span(host):
+        if self._outgoing_length(host):
             self.pump.mark_dirty(host)
         _LOGGER.info("Fixture scan of %s found %s fixture(s)", host, len(seen))
 
@@ -678,9 +696,21 @@ class ColorKineticsHub:
         buffer = self._buffers.setdefault(host, bytearray(DMX_SLOTS))
         buffer[start:end] = data
         self._span[host] = max(self._span.get(host, 0), end)
+        self._remember_fixture_bytes(host, start, end)
         if schedule:
             self.pump.mark_dirty(host)
         return True
+
+    def _remember_fixture_bytes(self, host: str, start: int, end: int) -> None:
+        """Record the channels just written for each fixture the write covered."""
+        buffer = self._buffers[host]
+        for fixture in self._fixtures.values():
+            if fixture.host != host or fixture.dmx_start is None:
+                continue
+            slot = fixture.dmx_start
+            slot_end = slot + CHANNELS_PER_FIXTURE
+            if start <= slot and end >= slot_end:
+                self._saved_channels[fixture.key] = bytes(buffer[slot:slot_end])
 
     def write_same_channels(self, host: str, starts: list[int], data: bytes) -> None:
         """Write one payload at several DMX starts and schedule a single send."""
@@ -690,31 +720,80 @@ class ColorKineticsHub:
         if wrote:
             self.pump.mark_dirty(host)
 
-    def _fixture_span(self, host: str) -> int:
-        end = 0
+    def _splice_unavailable(self, host: str) -> None:
+        """Put the last sent color back into slots we are not driving this session."""
+        buffer = self._buffers.setdefault(host, bytearray(DMX_SLOTS))
+        for fixture in self._fixtures.values():
+            if fixture.host != host or self.is_available(fixture):
+                continue
+            saved = self._saved_channels.get(fixture.key)
+            if not saved or fixture.dmx_start is None:
+                continue
+            start = fixture.dmx_start
+            buffer[start : start + len(saved)] = saved
+
+    def _outgoing_length(self, host: str) -> int:
+        """Bytes of channel data we have actually set or restored.
+
+        Fixtures with no saved color do not extend the frame. Extending it
+        would transmit the zero-filled buffer over their slots.
+        """
+        self._splice_unavailable(host)
+        end = self._span.get(host, 0)
         for fixture in self._fixtures.values():
             if fixture.host != host or fixture.dmx_start is None:
                 continue
-            end = max(end, fixture.dmx_start + CHANNELS_PER_FIXTURE)
+            saved = self._saved_channels.get(fixture.key)
+            if not saved:
+                continue
+            end = max(end, fixture.dmx_start + len(saved))
         return end
+
+    def _pad_would_zero_unset(self, host: str, length: int) -> bool:
+        """True when the 24-byte PORTOUT pad would cover a fixture never set."""
+        if length >= PORTOUT_MIN_DATA:
+            return False
+        for fixture in self._fixtures.values():
+            if fixture.host != host or fixture.dmx_start is None:
+                continue
+            if fixture.key in self._saved_channels:
+                continue
+            start = fixture.dmx_start
+            if start < PORTOUT_MIN_DATA and start + CHANNELS_PER_FIXTURE > length:
+                return True
+        return False
 
     def _transmit(self, host: str) -> bool:
         if host not in self.hosts:
             self.pump.forget(host)
             return False
-        span = max(self._span.get(host, 0), self._fixture_span(host))
-        if span <= 0:
+        length = self._outgoing_length(host)
+        if length <= 0:
             return False
         buffer = self._buffers.setdefault(host, bytearray(DMX_SLOTS))
-        data = bytes(buffer[:span])
+        data = bytes(buffer[:length])
         protocol, version, port = output_settings_of(self.entry)
         sequence = self.client.allocate_sequence()
         if protocol == "dmxout":
             packet = build_dmxout(sequence, data)
         else:
-            packet = build_portout(sequence, port, data, version=version)
+            packet = build_portout(
+                sequence,
+                port,
+                data,
+                version=version,
+                pad=not self._pad_would_zero_unset(host, length),
+            )
         self.client.send(host, packet)
         return True
+
+    def _restore_saved_channels(self) -> None:
+        """Write stored fixture colors into the buffers before the pump runs."""
+        for key, payload in list(self._saved_channels.items()):
+            fixture = self._fixtures.get(key)
+            if fixture is None or fixture.dmx_start is None:
+                continue
+            self.write_channels(fixture.host, fixture.dmx_start, payload, schedule=False)
 
     def _load_cache(self, stored: dict[str, Any]) -> None:
         for host, info in stored.get("supplies", {}).items():
@@ -732,6 +811,16 @@ class ColorKineticsHub:
             if fixture.source == "manual":
                 continue
             self._fixtures[fixture.key] = fixture
+        for key, raw in stored.get("channels", {}).items():
+            if not isinstance(raw, str):
+                continue
+            try:
+                payload = bytes.fromhex(raw)
+            except ValueError:
+                _LOGGER.warning("Skipping stored channels for %s", key)
+                continue
+            if payload:
+                self._saved_channels[str(key)] = payload
 
     def _cache(self) -> dict[str, Any]:
         fixtures = {
@@ -744,6 +833,9 @@ class ColorKineticsHub:
             "scanned_hosts": sorted(self._scanned_hosts),
             "ports": self._ports,
             "fixtures": fixtures,
+            "channels": {
+                key: payload.hex() for key, payload in self._saved_channels.items() if payload
+            },
         }
 
     async def _save(self) -> None:

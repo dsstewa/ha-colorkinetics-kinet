@@ -29,7 +29,7 @@ from .const import (
     PROTOCOL_PORTOUT,
 )
 from .entry_data import hosts_of, manual_text_of, supplies_of
-from .order import apply_submitted_order
+from .order import apply_submitted_order, merge_group_members
 from .manual import HostListError, ManualFixtureError, parse_host_list, parse_manual_fixtures
 from .protocol import KiNetError, SupplyInfo, async_probe_host, supply_entry_dict
 
@@ -269,9 +269,10 @@ class ColorKineticsOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Pick a group to edit, add one, or leave the list as it is."""
         groups = self._saved_groups()
+        labels = await self._group_action_labels()
         options: list[dict[str, str]] = [
-            {"value": "add", "label": "Add group"},
-            {"value": "done", "label": "Done"},
+            {"value": "add", "label": labels["add"]},
+            {"value": "done", "label": labels["done"]},
         ]
         options[1:1] = [
             {"value": group["id"], "label": group["name"]} for group in groups
@@ -311,14 +312,21 @@ class ColorKineticsOptionsFlow(OptionsFlow):
                 groups = [group for group in self._saved_groups() if group["id"] != group_id]
                 return self._save_preserved(groups=groups)
             name = str(user_input.get("name") or "").strip()
+            groups = [group for group in self._saved_groups() if group["id"] != group_id]
             if not name:
                 errors["name"] = "invalid_group"
+            elif any(group["name"].casefold() == name.casefold() for group in groups):
+                errors["name"] = "duplicate_group"
             else:
                 chosen = [str(entity_id) for entity_id in user_input.get("members") or []]
-                members = [by_entity[entity_id] for entity_id in chosen if entity_id in by_entity]
-                groups = [group for group in self._saved_groups() if group["id"] != group_id]
-                groups.append({"id": group_id, "name": name, "members": members})
-                return self._save_preserved(groups=groups)
+                submitted = [by_entity[entity_id] for entity_id in chosen if entity_id in by_entity]
+                previous = current["members"] if current is not None else []
+                members = merge_group_members(previous, submitted, set(by_entity.values()))
+                if not members:
+                    errors["members"] = "group_members"
+                else:
+                    groups.append({"id": group_id, "name": name, "members": members})
+                    return self._save_preserved(groups=groups)
         suggested_members = []
         if current is not None:
             suggested_members = [
@@ -347,6 +355,19 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             errors=errors,
             description_placeholders={"name": current["name"] if current else "New group"},
         )
+
+    async def _group_action_labels(self) -> dict[str, str]:
+        """Labels for the group menu. The text lives in strings.json."""
+        from homeassistant.helpers.translation import async_get_translations
+
+        translated = await async_get_translations(
+            self.hass, self.hass.config.language, "selector", [DOMAIN]
+        )
+        prefix = f"component.{DOMAIN}.selector.group_action.options."
+        return {
+            "add": translated.get(f"{prefix}add", "add"),
+            "done": translated.get(f"{prefix}done", "done"),
+        }
 
     def _save_preserved(self, **updates: Any) -> ConfigFlowResult:
         """Store order or groups without dropping the other options."""

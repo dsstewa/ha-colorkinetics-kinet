@@ -440,6 +440,69 @@ async def test_fixture_order_and_groups_round_trip(hass, probes):
     await hass.async_block_till_done()
     assert entry.options[CONF_GROUPS] == []
 
+    menu = await hass.config_entries.options.async_init(entry.entry_id)
+    groups = await hass.config_entries.options.async_configure(
+        menu["flow_id"], {"next_step_id": "groups"}
+    )
+    action = groups["data_schema"].schema["group_action"]
+    labels = [option["label"] for option in action.config["options"]]
+    assert labels[0] == "Add group"
+    assert "Done" in labels
+    editor = await hass.config_entries.options.async_configure(
+        groups["flow_id"], {"group_action": "add"}
+    )
+    assert editor["data_schema"] is not None
+    empty = await hass.config_entries.options.async_configure(
+        editor["flow_id"], {"name": "Oaks", "members": [], "delete": False}
+    )
+    assert empty["errors"]["members"] == "group_members"
+    created_group = await hass.config_entries.options.async_configure(
+        empty["flow_id"],
+        {"name": "Oaks", "members": [first, second], "delete": False},
+    )
+    await hass.async_block_till_done()
+    stored = entry.options[CONF_GROUPS][0]
+    group_id = stored["id"]
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            **entry.options,
+            CONF_GROUPS: [
+                {
+                    "id": group_id,
+                    "name": "Oaks",
+                    "members": ["880055BE", "DEADBEEF", "88002CD9"],
+                }
+            ],
+        },
+    )
+    await hass.async_block_till_done()
+    menu = await hass.config_entries.options.async_init(entry.entry_id)
+    groups = await hass.config_entries.options.async_configure(
+        menu["flow_id"], {"next_step_id": "groups"}
+    )
+    editor = await hass.config_entries.options.async_configure(
+        groups["flow_id"], {"group_action": group_id}
+    )
+    kept = await hass.config_entries.options.async_configure(
+        editor["flow_id"],
+        {"name": "Oaks", "members": [first], "delete": False},
+    )
+    await hass.async_block_till_done()
+    assert entry.options[CONF_GROUPS][0]["members"] == ["DEADBEEF", "880055BE"]
+    menu = await hass.config_entries.options.async_init(entry.entry_id)
+    groups = await hass.config_entries.options.async_configure(
+        menu["flow_id"], {"next_step_id": "groups"}
+    )
+    editor = await hass.config_entries.options.async_configure(
+        groups["flow_id"], {"group_action": "add"}
+    )
+    duplicate = await hass.config_entries.options.async_configure(
+        editor["flow_id"],
+        {"name": "oaks", "members": [second], "delete": False},
+    )
+    assert duplicate["errors"]["name"] == "duplicate_group"
+
     hass.config_entries.async_update_entry(
         entry, options={**entry.options, CONF_GROUPS: [None, {"name": "Nameless"}]}
     )

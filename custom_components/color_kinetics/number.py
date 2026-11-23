@@ -73,7 +73,6 @@ class EffectSpeed(RestoreNumber, NumberEntity):
                 self._hub.hosts[0] if self._hub.hosts else "",
             )
             self._attr_translation_key = SUFFIX_EFFECT_SPEED
-            self._attr_name = None
             if host:
                 self._attr_device_info = self._hub.supply_device_info(host)
             return

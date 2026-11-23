@@ -65,7 +65,7 @@ All fixtures and each group light accept an effect:
 
 **Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. Unavailable fixtures are left out of the pattern and are not written, so a missed fixture is not zeroed.
 
-A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns.
+A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns. The last color sent to each fixture is stored and restored before the frame pump starts, so a reload does not black out an unavailable fixture. A PORTOUT frame is not zero-padded across a fixture that has never been set.
 
 ## Options
 
