@@ -99,6 +99,19 @@ Confirmed from the QuickPlay Pro 2 capture of this Data Enabler Pro, and still o
 - There is no per-fixture online/health packet in any public source.
 - Netmask, gateway, and DHCP were not in the capture and are not read.
 
+## GitHub settings HACS still needs
+
+The HACS action checks repository metadata that a pull request cannot change. On the repository page, open the gear next to **About** and add at least one topic. HACS treats an empty topic list as "no valid topics" and fails the check. Suggested topics:
+
+- `home-assistant`
+- `homeassistant`
+- `hacs`
+- `color-kinetics`
+- `kinet`
+- `lighting`
+
+The repository description is already set, so that check passes. After the topics are saved, re-run the **HACS** workflow. The integration also ships `custom_components/color_kinetics/brand/icon.png`, which is the brand file that check looks for. It is an original mark for this integration, not a Philips logo.
+
 ## Development
 
 Python 3.14 and Home Assistant 2026.10 (what `pytest-homeassistant-custom-component` 0.13.375 vendors).
