@@ -1,0 +1,65 @@
+save_look:
+  name: Save look
+  description: Save the current fixture colors, brightness, and any running effect and speed as a named look.
+  fields:
+    name:
+      name: Name
+      description: Name for this look. A name that matches an existing look in any case is rejected.
+      required: true
+      selector:
+        text:
+    device_id:
+      name: Data Enabler
+      description: Which entry to save when more than one Color Kinetics integration is loaded.
+      required: false
+      selector:
+        device:
+          filter:
+            - integration: color_kinetics
+recall_look:
+  name: Recall look
+  description: Restore a saved look. Fixtures that are no longer present are skipped.
+  fields:
+    name:
+      name: Name
+      description: Name of the look to recall. Matching ignores case.
+      required: true
+      selector:
+        text:
+    transition:
+      name: Transition
+      description: Seconds to fade to the look. Leave empty to change at once.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 3600
+          step: 0.1
+          unit_of_measurement: seconds
+          mode: box
+    device_id:
+      name: Data Enabler
+      description: Which entry to recall when more than one Color Kinetics integration is loaded.
+      required: false
+      selector:
+        device:
+          filter:
+            - integration: color_kinetics
+delete_look:
+  name: Delete look
+  description: Delete a saved look. Matching ignores case.
+  fields:
+    name:
+      name: Name
+      description: Name of the look to delete.
+      required: true
+      selector:
+        text:
+    device_id:
+      name: Data Enabler
+      description: Which entry to update when more than one Color Kinetics integration is loaded.
+      required: false
+      selector:
+        device:
+          filter:
+            - integration: color_kinetics

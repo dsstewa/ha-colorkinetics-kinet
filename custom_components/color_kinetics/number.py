@@ -31,6 +31,7 @@ async def async_setup_entry(
                 added.append(entity)
             elif entity.hass is not None:
                 entity.refresh()
+            hub.speed_entities[owner] = entity
         if added:
             async_add_entities(added)
 
@@ -97,6 +98,13 @@ class EffectSpeed(RestoreNumber, NumberEntity):
         self._attr_native_value = float(value)
         self._hub.set_effect_speed(self._owner, float(value))
         self.async_write_ha_state()
+
+    def apply_external_speed(self, value: float) -> None:
+        """Show a speed restored with a look."""
+        self._attr_native_value = float(value)
+        self._hub.set_effect_speed(self._owner, float(value))
+        if self.hass is not None:
+            self.async_write_ha_state()
 
     def refresh(self) -> None:
         """Follow a renamed group or a replaced supply device."""

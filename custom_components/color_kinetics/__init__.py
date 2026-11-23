@@ -9,6 +9,7 @@ from homeassistant.helpers.storage import Store
 from .const import DOMAIN, PLATFORMS
 from .hub import STORAGE_VERSION, ColorKineticsConfigEntry, ColorKineticsHub
 from .migrate import async_migrate_entry as async_migrate_entry
+from .services import async_register_services, async_remove_services
 
 
 async def async_setup_entry(
@@ -28,6 +29,7 @@ async def async_setup_entry(
             hub.async_initial_refresh(),
             "color_kinetics refresh",
         )
+        async_register_services(hass)
     except Exception:
         await hub.async_stop()
         raise
@@ -41,6 +43,8 @@ async def async_unload_entry(
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         await entry.runtime_data.async_stop()
+        if not hass.config_entries.async_loaded_entries(DOMAIN):
+            async_remove_services(hass)
     return unload_ok
 
 
