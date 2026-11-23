@@ -39,14 +39,39 @@ blueprint:
       default: ""
       selector:
         text:
+    supply:
+      name: Data Enabler
+      description: >
+        Optional. Choose the Data Enabler when more than one Color Kinetics
+        entry is loaded, so the look is recalled on that entry. Leave it
+        empty when there is only one.
+      default: []
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: color_kinetics
+          entity:
+            - domain: select
+              integration: color_kinetics
     light:
       name: Light
       description: >
-        Light to turn on when no look is set, and to fade off at bedtime.
-        Choose All fixtures or the group the look was meant for.
+        Light to turn on with the effect when no look is set. Bedtime also
+        fades this light off.
       selector:
         entity:
           filter:
+            - domain: light
+              integration: color_kinetics
+    off_lights:
+      name: Lights to fade off
+      description: >
+        Faded off at bedtime. Choose All fixtures, and any group the look
+        turns on, so a recalled look goes dark instead of only the effect light.
+      selector:
+        target:
+          entity:
             - domain: light
               integration: color_kinetics
     effect:
@@ -115,6 +140,7 @@ actions:
               - action: color_kinetics.recall_look
                 data:
                   name: !input look
+                  device_id: !input supply
             else:
               - action: light.turn_on
                 target:
@@ -125,6 +151,10 @@ actions:
           - condition: trigger
             id: bedtime
         sequence:
+          - action: light.turn_off
+            target: !input off_lights
+            data:
+              transition: !input transition
           - action: light.turn_off
             target:
               entity_id: !input light

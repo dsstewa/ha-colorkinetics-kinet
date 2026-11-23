@@ -154,7 +154,7 @@
         },
         "device_id": {
           "name": "Data Enabler",
-          "description": "Which entry to save when more than one Color Kinetics integration is loaded."
+          "description": "Which entry to save when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
         }
       }
     },
@@ -172,7 +172,7 @@
         },
         "device_id": {
           "name": "Data Enabler",
-          "description": "Which entry to recall when more than one Color Kinetics integration is loaded."
+          "description": "Which entry to recall when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
         }
       }
     },
@@ -186,7 +186,7 @@
         },
         "device_id": {
           "name": "Data Enabler",
-          "description": "Which entry to update when more than one Color Kinetics integration is loaded."
+          "description": "Which entry to update when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
         }
       }
     }

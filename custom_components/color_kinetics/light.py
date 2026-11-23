@@ -23,7 +23,7 @@ from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util import color as color_util
 
 from .const import CHANNELS_PER_FIXTURE, DEFAULT_EFFECT_SPEED, DOMAIN
-from .effects import EFFECT_NAMES, EFFECT_SOLID
+from .effects import EFFECT_NAMES, EFFECT_SOLID, fixture_channels
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub, Fixture
 from .properties import SUFFIX_ALL_FIXTURES
 
@@ -399,6 +399,12 @@ class AllFixturesLight(LightEntity):
             self._attr_is_on = True
             self._attr_available = bool(self._members())
             return
+        pending = self._hub.deferred_effect(self._owner_id)
+        if pending is not None and pending.get("effect") not in (None, EFFECT_SOLID):
+            self._attr_effect = str(pending["effect"])
+            self._attr_is_on = True
+            self._attr_available = bool(self._members())
+            return
         self._attr_effect = EFFECT_SOLID
         if self._stolen():
             self._attr_is_on = False
@@ -407,13 +413,24 @@ class AllFixturesLight(LightEntity):
         self._sync_from_members()
 
     def _remember_members(self, members: list[FixtureLight] | None = None) -> None:
+        """Copy this light onto members it still owns.
+
+        A fixture this effect owns is on, at the effect's brightness. Its
+        previous color is kept. A fixture another effect owns is left alone.
+        """
         rgb = tuple(self._attr_rgb_color or (255, 255, 255))
         for member in self._members() if members is None else members:
-            if member._key in self._hub.effects.owners:
+            owner = self._hub.effects.owners.get(member._key)
+            if owner is not None and owner != self._owner_id:
                 continue
-            member._attr_is_on = bool(self._attr_is_on)
-            member._attr_rgb_color = rgb
-            member._attr_brightness = self._attr_brightness
+            run = self._hub.effects.runs.get(self._owner_id) if owner == self._owner_id else None
+            if run is not None and member._key in run.order:
+                member._attr_is_on = True
+                member._attr_brightness = int(run.brightness)
+            else:
+                member._attr_is_on = bool(self._attr_is_on)
+                member._attr_rgb_color = rgb
+                member._attr_brightness = self._attr_brightness
             member._attr_color_mode = ColorMode.RGB
             if member.hass is not None:
                 member.async_write_ha_state()
@@ -488,9 +505,14 @@ class AllFixturesLight(LightEntity):
             effect = EFFECT_SOLID
         self._attr_effect = effect
         members = self._members()
-        self._hub.note_command([member._key for member in members])
-        self._claim(effect)
+        epoch = self._hub.note_command([member._key for member in members])
         duration = transition_seconds(kwargs)
+        if effect != EFFECT_SOLID and duration > 0:
+            self._fade_in_effect(members, effect, rgb, brightness, duration, epoch)
+            self.publish()
+            self._hub.notify_light_states()
+            return
+        self._claim(effect)
         if effect == EFFECT_SOLID:
             if duration > 0:
                 self._remember_members(members)
@@ -507,6 +529,47 @@ class AllFixturesLight(LightEntity):
         self._hub.render_effects(self._hub.effect_clock())
         self.publish()
         self._hub.notify_light_states()
+
+    def _fade_in_effect(
+        self,
+        members: list[FixtureLight],
+        effect: str,
+        rgb: tuple[int, int, int],
+        brightness: int,
+        duration: float,
+        epoch: int,
+    ) -> None:
+        """Fade each member up to the effect's first frame, then start it.
+
+        Members are on at the effect brightness while the channels fade, so a
+        look saved during the fade does not record them as off.
+        """
+        count = len(members)
+        for index, member in enumerate(members):
+            member._attr_is_on = True
+            member._attr_brightness = brightness
+            member._attr_color_mode = ColorMode.RGB
+            target = fixture_channels(effect, index, count, 0.0, rgb, brightness)
+            self._hub.cancel_fades([member._key])
+            self._hub.start_fade(member._key, target, duration)
+            if member.hass is not None:
+                member.async_write_ha_state()
+        self._hub.defer_effects(
+            epoch,
+            duration,
+            [
+                (
+                    self._owner_id,
+                    {
+                        "effect": effect,
+                        "speed": self._hub.effect_speed(self._owner_id),
+                        "rgb": [int(channel) for channel in rgb],
+                        "brightness": int(brightness),
+                        "is_on": True,
+                    },
+                )
+            ],
+        )
 
     def _members_we_may_turn_off(self) -> list[FixtureLight]:
         """Fixtures this light may black out. Another effect's fixtures are left alone."""

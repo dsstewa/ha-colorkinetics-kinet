@@ -74,11 +74,11 @@ Holiday effects use those colors rather than the light's color. Brightness still
 
 A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
 
-Fixture, group, and All fixtures lights accept a transition. The channels fade from what is on the wire to the new color, in the same frame loop (at most 40 times a second). The one-second keepalive and the send backoff are unchanged. Turning a light off with a transition fades those channels to zero. A newer command cancels the fade for the fixtures it takes and leaves every other fade running. Starting an animated effect takes those fixtures immediately, so a transition on that same command does not hold the effect back.
+Fixture, group, and All fixtures lights accept a transition. The channels fade from what is on the wire to the new color, in the same frame loop (at most 40 times a second). The one-second keepalive and the send backoff are unchanged. Turning a light off with a transition fades those channels to zero. A newer command cancels the fade for the fixtures it takes and leaves every other fade running. Turning on an animated effect with a transition fades each fixture to that effect's first frame, then the effect runs.
 
 ## Saved looks
 
-The **Look** selector on the Data Enabler recalls a saved look. Its options are the look names.
+The **Look** selector on the Data Enabler recalls a saved look. Its options are the look names. The last look you saved or recalled stays selected across a restart.
 
 Services, on the `color_kinetics` domain:
 
@@ -90,11 +90,11 @@ Services, on the `color_kinetics` domain:
 
 Names match without regard to case, and a duplicate is rejected. The look is keyed by fixture serial and by group id, so renaming a fixture or a group does not break it. A serial that is no longer present is skipped. Fixtures that are not in the look are left as they are. Looks live in the same `.storage/color_kinetics_{entry_id}` file as the fixture cache. A cache written by 0.1.1 is migrated to storage version 2, which adds the look map. Deleting the config entry still removes that file.
 
-With more than one Color Kinetics entry loaded, pass `device_id` (the Data Enabler device) so the service knows which entry you mean.
+With more than one Color Kinetics entry loaded, pass `device_id` for the Data Enabler. A fixture device on that supply selects the same entry.
 
 ## Sunset to bedtime
 
-The repo includes an automation blueprint that is not installed for you. At sunset, plus or minus an offset, it recalls a look when you set one, or turns a chosen light on with an effect. At a time you choose, it fades that light off.
+The repo includes an automation blueprint that is not installed for you. At sunset, plus or minus an offset, it recalls a look when you set one, or turns a chosen light on with an effect. An optional Data Enabler input is sent as `device_id` so the recall hits the right entry when you have more than one. At a time you choose, it fades off the lights you pick for bedtime (All fixtures, and any group the look uses) and the effect light.
 
 [Import the sunset to bedtime blueprint](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fdssstewa%2Fha-colorkinetics-kinet%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fcolor_kinetics%2Fsunset_to_bedtime.yaml).
 

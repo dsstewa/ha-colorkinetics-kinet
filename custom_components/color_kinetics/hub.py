@@ -214,7 +214,7 @@ class ColorKineticsHub:
         self._look_listeners: list[Listener] = []
         self._command_epoch: dict[str, int] = {}
         self._epoch = 0
-        self._deferred: _DeferredEffects | None = None
+        self._deferred: list[_DeferredEffects] = []
         self.fixture_lights: dict[str, Any] = {}
         self.supply_lights: dict[str, Any] = {}
         self.group_lights: dict[str, Any] = {}
@@ -360,7 +360,7 @@ class ColorKineticsHub:
 
     def _animating(self) -> bool:
         """True while an effect, a fade, or a deferred look effect still needs frames."""
-        return self.effects.active or self.fades.active or self._deferred is not None
+        return self.effects.active or self.fades.active or bool(self._deferred)
 
     def note_command(self, keys: list[str]) -> int:
         """Record that a new command owns these fixtures.
@@ -376,12 +376,37 @@ class ColorKineticsHub:
         return epoch
 
     def _drop_stale_deferred(self) -> None:
-        deferred = self._deferred
-        if deferred is None:
+        self._deferred = [
+            item
+            for item in self._deferred
+            if any(epoch == item.epoch for epoch in self._command_epoch.values())
+        ]
+
+    def defer_effects(
+        self,
+        epoch: int,
+        delay: float,
+        effects: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Start ``effects`` after ``delay`` seconds, for fixtures still at ``epoch``."""
+        if not effects or delay < 0:
             return
-        if any(epoch == deferred.epoch for epoch in self._command_epoch.values()):
-            return
-        self._deferred = None
+        self._deferred.append(
+            _DeferredEffects(
+                epoch=epoch,
+                deadline=self.effect_clock() + delay,
+                effects=list(effects),
+            )
+        )
+        self.ensure_effect_loop()
+
+    def deferred_effect(self, owner: str) -> dict[str, Any] | None:
+        """Effect a light is fading into and has not started yet."""
+        for item in self._deferred:
+            for item_owner, saved in item.effects:
+                if item_owner == owner:
+                    return saved
+        return None
 
     def cancel_fades(self, keys: list[str]) -> None:
         """Stop fades for the fixtures a new command is taking."""
@@ -467,19 +492,26 @@ class ColorKineticsHub:
         return None
 
     def _start_deferred(self, now: float) -> None:
-        """Start a recalled effect once its fade deadline has passed."""
-        deferred = self._deferred
-        if deferred is None or now < deferred.deadline:
-            return
-        self._deferred = None
-        allowed = {
-            key for key, epoch in self._command_epoch.items() if epoch == deferred.epoch
-        }
-        for owner, saved in deferred.effects:
-            light = self._light_for_owner(owner)
-            if light is None:
-                continue
-            light.apply_effect_look(saved, only_keys=allowed)
+        """Start effects whose fade deadline has passed."""
+        waiting: list[_DeferredEffects] = []
+        due: list[_DeferredEffects] = []
+        for item in self._deferred:
+            if now >= item.deadline:
+                due.append(item)
+            else:
+                waiting.append(item)
+        self._deferred = waiting
+        for deferred in due:
+            allowed = {
+                key
+                for key, epoch in self._command_epoch.items()
+                if epoch == deferred.epoch
+            }
+            for owner, saved in deferred.effects:
+                light = self._light_for_owner(owner)
+                if light is None:
+                    continue
+                light.apply_effect_look(saved, only_keys=allowed)
 
     def render_frame(self, now: float) -> None:
         """One animation step: finish due look effects, then fades, then effects."""
@@ -529,18 +561,31 @@ class ColorKineticsHub:
         for key, light in self.fixture_lights.items():
             rgb = tuple(int(channel) for channel in (light._attr_rgb_color or (255, 255, 255)))
             brightness = 255 if light._attr_brightness is None else int(light._attr_brightness)
+            is_on = bool(light.is_on)
+            owner = self.effects.owners.get(str(key))
+            run = self.effects.runs.get(owner) if owner else None
+            if run is not None and str(key) in run.order:
+                is_on = True
+                brightness = int(run.brightness)
             fixtures[str(key)] = {
-                "is_on": bool(light.is_on),
+                "is_on": is_on,
                 "brightness": brightness,
                 "rgb": [rgb[0], rgb[1], rgb[2]],
             }
         lights: dict[str, Any] = {}
         for light in (*self.supply_lights.values(), *self.group_lights.values()):
             run = self.effects.runs.get(light._owner_id)
+            pending = self.deferred_effect(light._owner_id)
             if run is not None and run.order:
                 effect = run.effect
                 rgb = tuple(int(channel) for channel in run.rgb)
                 brightness = int(run.brightness)
+                is_on = True
+            elif pending is not None and pending.get("effect") not in (None, EFFECT_SOLID):
+                effect = str(pending["effect"])
+                rgb = tuple(int(channel) for channel in (pending.get("rgb") or (255, 255, 255)))
+                brightness = int(pending.get("brightness") or 255)
+                is_on = True
             else:
                 effect = EFFECT_SOLID
                 rgb = tuple(
@@ -549,12 +594,19 @@ class ColorKineticsHub:
                 brightness = (
                     255 if light._attr_brightness is None else int(light._attr_brightness)
                 )
+                is_on = bool(light.is_on)
+            speed = self.effect_speed(light._owner_id)
+            if pending is not None and pending.get("speed") is not None:
+                try:
+                    speed = float(pending["speed"])
+                except (TypeError, ValueError):
+                    speed = self.effect_speed(light._owner_id)
             lights[str(light._owner_id)] = {
                 "effect": effect,
-                "speed": self.effect_speed(light._owner_id),
+                "speed": speed,
                 "rgb": [rgb[0], rgb[1], rgb[2]],
                 "brightness": brightness,
-                "is_on": bool(light.is_on),
+                "is_on": is_on,
             }
         return {"fixtures": fixtures, "lights": lights}
 
@@ -663,14 +715,7 @@ class ColorKineticsHub:
                 continue
             light.apply_effect_look(saved, only_keys=allowed)
         if deferred:
-            self._deferred = _DeferredEffects(
-                epoch=epoch,
-                deadline=self.effect_clock() + duration,
-                effects=deferred,
-            )
-            self.ensure_effect_loop()
-        else:
-            self._deferred = None
+            self.defer_effects(epoch, duration, deferred)
         self.selected_look = stored
         self.notify_looks()
         self.notify_light_states()
@@ -767,7 +812,7 @@ class ColorKineticsHub:
         self.effects.runs.clear()
         self.effects.owners.clear()
         self.fades.clear()
-        self._deferred = None
+        self._deferred.clear()
         task = self._effect_task
         self._effect_task = None
         if task is not None:
@@ -1150,6 +1195,11 @@ class ColorKineticsHub:
             for name, look in raw_looks.items():
                 if isinstance(name, str) and name.strip() and isinstance(look, dict):
                     self._looks[name] = look
+        selected = stored.get("selected_look")
+        if isinstance(selected, str) and selected in self._looks:
+            self.selected_look = selected
+        else:
+            self.selected_look = None
 
     def _cache(self) -> dict[str, Any]:
         fixtures = {
@@ -1166,6 +1216,7 @@ class ColorKineticsHub:
                 key: payload.hex() for key, payload in self._saved_channels.items() if payload
             },
             "looks": self._looks,
+            "selected_look": self.selected_look,
         }
 
     async def _save(self) -> None:

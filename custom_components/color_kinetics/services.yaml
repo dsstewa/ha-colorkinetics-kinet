@@ -10,12 +10,15 @@ save_look:
         text:
     device_id:
       name: Data Enabler
-      description: Which entry to save when more than one Color Kinetics integration is loaded.
+      description: Which entry to save when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry.
       required: false
       selector:
         device:
           filter:
             - integration: color_kinetics
+          entity:
+            - domain: select
+              integration: color_kinetics
 recall_look:
   name: Recall look
   description: Restore a saved look. Fixtures that are no longer present are skipped.
@@ -39,12 +42,15 @@ recall_look:
           mode: box
     device_id:
       name: Data Enabler
-      description: Which entry to recall when more than one Color Kinetics integration is loaded.
+      description: Which entry to recall when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry.
       required: false
       selector:
         device:
           filter:
             - integration: color_kinetics
+          entity:
+            - domain: select
+              integration: color_kinetics
 delete_look:
   name: Delete look
   description: Delete a saved look. Matching ignores case.
@@ -57,9 +63,12 @@ delete_look:
         text:
     device_id:
       name: Data Enabler
-      description: Which entry to update when more than one Color Kinetics integration is loaded.
+      description: Which entry to update when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry.
       required: false
       selector:
         device:
           filter:
             - integration: color_kinetics
+          entity:
+            - domain: select
+              integration: color_kinetics

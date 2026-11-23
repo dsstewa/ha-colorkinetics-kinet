@@ -225,7 +225,8 @@ async def test_group_effect_takes_fixtures_and_skips_unavailable(hass, fake_udp,
     assert data[0:3] == b"\x00\xff\x00"
     assert data[3:6] == b"\x00\x00\x00"
     assert data[6:9] == b"\x00\x00\x00"
-    assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state != STATE_ON
+    # The chase frame is dark here, but the fixture belongs to the effect, so it is on.
+    assert hass.states.get(_entity_id(hass, "light", "88002CD9")).state == STATE_ON
     from homeassistant.components.light import DATA_COMPONENT
 
     member = hass.data[DATA_COMPONENT].get_entity(_entity_id(hass, "light", "88002CD9"))

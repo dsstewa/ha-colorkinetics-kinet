@@ -301,6 +301,8 @@ async def test_looks_round_trip_across_reload_and_missing_fixtures(hass, hass_st
     key = f"color_kinetics_{entry.entry_id}"
     assert hass_storage[key]["version"] == STORAGE_VERSION
     assert "Evening" in hass_storage[key]["data"]["looks"]
+    assert hass_storage[key]["data"]["selected_look"] == "Evening"
+    assert hass.states.get(_entity_id(hass, "select", f"{SUPPLY_SERIAL}:look")).state == "Evening"
 
     hub._looks["Evening"]["fixtures"].pop("88002CD9")
     hub._looks["Evening"]["fixtures"]["FFFFFFFF"] = {
@@ -321,7 +323,7 @@ async def test_looks_round_trip_across_reload_and_missing_fixtures(hass, hass_st
     restored = hass.states.get(_entity_id(hass, "light", "880055BE"))
     assert restored.state == STATE_ON
     assert restored.attributes["rgb_color"] == (255, 0, 0)
-    assert restored.attributes["brightness"] == 128
+    assert restored.attributes["brightness"] == 255
     assert bytes(hub._buffers[SUPPLY_HOST][3:6]) == before_missing
     hub.render_effects(0.0)
     assert hub.effects.owners.get("880055BE") == hub.all_fixtures_owner(SUPPLY_HOST)
@@ -494,7 +496,7 @@ async def test_all_fixtures_fades_and_a_taken_fixture_is_not_reclaimed(hass, mon
     await hass.services.async_call(
         DOMAIN, "recall_look", {"name": "Spooky", "transition": 5}, blocking=True
     )
-    assert hub._deferred is not None
+    assert hub._deferred
     await hass.services.async_call(
         "light",
         "turn_on",
@@ -502,7 +504,7 @@ async def test_all_fixtures_fades_and_a_taken_fixture_is_not_reclaimed(hass, mon
         blocking=True,
     )
     assert hub.fades.contains("880055BE") is False
-    hub.render_frame(hub._deferred.deadline)
+    hub.render_frame(min(item.deadline for item in hub._deferred))
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\xff\xff\x00"
     assert hub.effects.owners.get("880055BE") != hub.all_fixtures_owner(SUPPLY_HOST)
     assert hub.all_fixtures_owner(SUPPLY_HOST) in hub.effects.owners.values()
@@ -515,7 +517,7 @@ async def test_transition_frame_rate_is_capped_and_recall_fades(hass, monkeypatc
         delays.append(delay)
         if len(delays) >= 3:
             self.fades.clear()
-            self._deferred = None
+            self._deferred.clear()
         await asyncio.sleep(0)
 
     monkeypatch.setattr(ColorKineticsHub, "_sleep", record)
@@ -574,13 +576,13 @@ async def test_transition_frame_rate_is_capped_and_recall_fades(hass, monkeypatc
     )
     assert hub.fades.contains("880055BE")
     assert "880055BE" not in hub.effects.owners
-    assert hub._deferred is not None
-    deadline = hub._deferred.deadline
+    assert hub._deferred
+    deadline = min(item.deadline for item in hub._deferred)
     hub.render_frame(deadline - 0.1)
     assert "880055BE" not in hub.effects.owners
     hub.render_frame(deadline)
     assert hub.effects.owners.get("880055BE") == hub.all_fixtures_owner(SUPPLY_HOST)
-    assert hub._deferred is None
+    assert hub._deferred == []
 
     await hass.services.async_call(
         "light",
@@ -639,9 +641,11 @@ async def test_sunset_blueprint_validates_and_is_not_installed(hass):
             "use_blueprint": {
                 "path": "color_kinetics/sunset_to_bedtime.yaml",
                 "input": {
-                    "light": "light.all_fixtures",
+                    "light": "light.porch",
                     "bedtime": "22:30:00",
                     "look": "Evening",
+                    "supply": ["device-enabler"],
+                    "off_lights": {"entity_id": ["light.all_fixtures", "light.oaks"]},
                 },
             }
         },
@@ -661,14 +665,133 @@ async def test_sunset_blueprint_validates_and_is_not_installed(hass):
         else:
             time_trigger.TRIGGER_SCHEMA(trigger)
     await async_validate_actions_config(hass, substituted["actions"])
+    sunset = substituted["actions"][0]["choose"][0]["sequence"][0]["then"][0]
+    assert sunset["action"] == "color_kinetics.recall_look"
+    assert sunset["data"]["device_id"] == ["device-enabler"]
+    bedtime = substituted["actions"][0]["choose"][1]["sequence"]
+    assert bedtime[0]["target"]["entity_id"] == ["light.all_fixtures", "light.oaks"]
+    assert bedtime[1]["target"]["entity_id"] == "light.porch"
+    assert "supply" in blueprint.inputs
+    assert "off_lights" in blueprint.inputs
     blank = BlueprintInputs(
         blueprint,
         {
             "use_blueprint": {
                 "path": "color_kinetics/sunset_to_bedtime.yaml",
-                "input": {"light": "light.all_fixtures", "bedtime": "21:00:00", "look": ""},
+                "input": {
+                    "light": "light.all_fixtures",
+                    "bedtime": "21:00:00",
+                    "look": "",
+                    "off_lights": {"entity_id": "light.all_fixtures"},
+                },
             }
         },
     ).async_substitute()
     await async_validate_actions_config(hass, blank["actions"])
+    assert blank["actions"][0]["choose"][0]["sequence"][0]["then"][0]["data"]["device_id"] == []
     assert hass.states.async_entity_ids("automation") == []
+
+
+async def test_christmas_saved_from_off_does_not_fade_to_black(hass, monkeypatch):
+    """An effect started from off is on, so recall fades toward that light, not black."""
+    await _hold_frames(monkeypatch)
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    one = _entity_id(hass, "light", "880055BE")
+    assert hass.states.get(one).state == STATE_OFF
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "effect": EFFECT_CHRISTMAS, "brightness": 128},
+        blocking=True,
+    )
+    state = hass.states.get(one)
+    assert state.state == STATE_ON
+    assert state.attributes["brightness"] == 128
+    await hass.services.async_call(DOMAIN, "save_look", {"name": "Tree"}, blocking=True)
+    saved = hub._looks["Tree"]["fixtures"]["880055BE"]
+    assert saved["is_on"] is True
+    assert saved["brightness"] == 128
+    owner = hub.all_fixtures_owner(SUPPLY_HOST)
+    assert hub._looks["Tree"]["lights"][owner]["effect"] == EFFECT_CHRISTMAS
+    await hass.services.async_call("light", "turn_off", {"entity_id": group}, blocking=True)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x00\x00\x00"
+    await hass.services.async_call(
+        DOMAIN,
+        "recall_look",
+        {"name": "Tree", "transition": 4},
+        blocking=True,
+    )
+    assert hub.fades.contains("880055BE")
+    started, duration = hub.fades.started_at("880055BE")
+    hub.render_fades(started + duration)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) != b"\x00\x00\x00"
+    assert hub._deferred
+    hub.render_frame(min(item.deadline for item in hub._deferred))
+    assert hub.effects.owners.get("880055BE") == owner
+    hub.render_effects(0.0)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x80\x00\x00"
+
+
+async def test_animated_turn_on_fades_into_the_first_frame(hass, monkeypatch):
+    await _hold_frames(monkeypatch)
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    one = _entity_id(hass, "light", "880055BE")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": group,
+            "effect": EFFECT_CHRISTMAS,
+            "brightness": 255,
+            "transition": 4,
+        },
+        blocking=True,
+    )
+    assert hass.states.get(one).state == STATE_ON
+    assert hass.states.get(one).attributes["brightness"] == 255
+    assert "880055BE" not in hub.effects.owners
+    assert hub.fades.contains("880055BE")
+    started, duration = hub.fades.started_at("880055BE")
+    hub.render_fades(started + duration / 2)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x80\x00\x00"
+    hub.render_fades(started + duration)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\xff\x00\x00"
+    hub.render_frame(min(item.deadline for item in hub._deferred))
+    assert hub.effects.owners.get("880055BE") == hub.all_fixtures_owner(SUPPLY_HOST)
+
+
+async def test_fixture_device_id_selects_its_supply(hass):
+    from custom_components.color_kinetics.services import expand_device_ids
+
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    registry = dr.async_get(hass)
+    fixture = registry.async_get_device_by_identifier((DOMAIN, "880055BE"), entry.entry_id)
+    supply = registry.async_get_device_by_identifier((DOMAIN, SUPPLY_SERIAL), entry.entry_id)
+    assert fixture.via_device_id == supply.id
+    expanded = expand_device_ids(hass, [hub], {fixture.id})
+    assert supply.id in expanded
+    await hass.services.async_call(
+        DOMAIN,
+        "save_look",
+        {"name": "Via fixture", "device_id": fixture.id},
+        blocking=True,
+    )
+    assert "Via fixture" in hub.look_names()
+    await hass.services.async_call(
+        DOMAIN,
+        "recall_look",
+        {"name": "Via fixture", "device_id": fixture.id},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        DOMAIN,
+        "delete_look",
+        {"name": "Via fixture", "device_id": []},
+        blocking=True,
+    )
+    assert hub.look_names() == []

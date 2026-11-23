@@ -8,6 +8,7 @@ import probatio
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
 from .hub import ColorKineticsHub
@@ -53,11 +54,54 @@ DELETE_LOOK_SCHEMA = probatio.Schema(
 
 
 def _device_ids(raw: Any) -> set[str]:
-    if raw is None:
+    """Device ids from a service call. A blank value means no device was chosen."""
+    if raw is None or raw == "":
         return set()
     if isinstance(raw, str):
         return {raw}
-    return {str(item) for item in raw}
+    return {str(item) for item in raw if item}
+
+
+def expand_device_ids(
+    hass: HomeAssistant, hubs: list[ColorKineticsHub], device_ids: set[str]
+) -> set[str]:
+    """Map a fixture device to its Data Enabler, and keep supply devices.
+
+    The service picker lists Data Enablers. A caller can still pass a fixture
+    device id; that fixture's supply is what selects the entry.
+    """
+    if not device_ids:
+        return set()
+    registry = dr.async_get(hass)
+    expanded = set(device_ids)
+    for device_id in device_ids:
+        device = registry.async_get(device_id)
+        if device is None:
+            continue
+        if device.via_device_id:
+            expanded.add(device.via_device_id)
+        for domain, ident in device.identifiers:
+            if domain != DOMAIN:
+                continue
+            for hub in hubs:
+                fixture = hub.get_fixture(str(ident))
+                if fixture is None:
+                    continue
+                supply = hub.supply_device_id(fixture.host)
+                if supply:
+                    expanded.add(supply)
+    return expanded
+
+
+def _supply_device_id_values(hub: ColorKineticsHub) -> set[str]:
+    """Device-registry ids of a hub's Data Enablers."""
+    private = getattr(hub, "_supply_device_ids", None)
+    if isinstance(private, dict):
+        return {str(value) for value in private.values()}
+    public = getattr(hub, "supply_device_ids", None)
+    if isinstance(public, dict):
+        return {str(value) for value in public.values()}
+    return set()
 
 
 def select_hubs(
@@ -66,7 +110,7 @@ def select_hubs(
     """Pick the hub for a service call.
 
     One loaded entry needs no device. Several entries need the Data Enabler
-    device id from the selector.
+    device id, or a fixture device that expand_device_ids has mapped to it.
     """
     wanted = _device_ids(device_id)
     if not wanted:
@@ -79,7 +123,7 @@ def select_hubs(
     chosen = [
         hub
         for hub in hubs
-        if wanted.intersection(hub.supply_device_ids.values())
+        if wanted.intersection(_supply_device_id_values(hub))
     ]
     if not chosen:
         raise ServiceValidationError(
@@ -98,19 +142,25 @@ def _loaded_hubs(hass: HomeAssistant) -> list[ColorKineticsHub]:
     return hubs
 
 
+def _hubs_for_call(call: ServiceCall) -> list[ColorKineticsHub]:
+    hubs = _loaded_hubs(call.hass)
+    wanted = expand_device_ids(call.hass, hubs, _device_ids(call.data.get("device_id")))
+    return select_hubs(hubs, wanted or None)
+
+
 async def _async_save_look(call: ServiceCall) -> None:
-    for hub in select_hubs(_loaded_hubs(call.hass), call.data.get("device_id")):
+    for hub in _hubs_for_call(call):
         await hub.async_save_look(call.data["name"])
 
 
 async def _async_recall_look(call: ServiceCall) -> None:
     transition = call.data.get("transition")
-    for hub in select_hubs(_loaded_hubs(call.hass), call.data.get("device_id")):
+    for hub in _hubs_for_call(call):
         await hub.async_recall_look(call.data["name"], transition)
 
 
 async def _async_delete_look(call: ServiceCall) -> None:
-    for hub in select_hubs(_loaded_hubs(call.hass), call.data.get("device_id")):
+    for hub in _hubs_for_call(call):
         await hub.async_delete_look(call.data["name"])
 
 
