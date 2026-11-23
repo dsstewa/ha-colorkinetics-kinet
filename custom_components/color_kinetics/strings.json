@@ -1,0 +1,91 @@
+{
+  "title": "Philips Color Kinetics",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a Data Enabler",
+        "description": "Enter the IPv4 address of each Philips Color Kinetics Data Enabler, one per line. The integration sends a read-only supply poll to each address. Add the integration again if a later supply needs a different KiNET mode.",
+        "data": {
+          "hosts": "Data Enabler IP addresses"
+        },
+        "data_description": {
+          "hosts": "Example: 172.16.10.41. One address per line, or separated by commas."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach {host} on UDP port 6038. Check the address and that Home Assistant is on the same network. Only a read-only supply poll was sent.",
+      "invalid_host": "Enter one or more IPv4 unicast addresses, one per line.",
+      "no_hosts": "Enter at least one Data Enabler IP address.",
+      "already_configured": "One of these Data Enablers is already configured."
+    },
+    "abort": {
+      "already_configured": "This Data Enabler is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Color Kinetics options",
+        "description": "Light data is unicast KiNET. v2 PORTOUT with header version 1 matches OLA. If a fixture stays dark, try header version 2, then v1 DMXOUT. The output port applies to PORTOUT only. These settings apply to every supply in this entry.",
+        "data": {
+          "hosts": "Data Enabler IP addresses",
+          "protocol": "Light protocol",
+          "portout_version": "PORTOUT header version",
+          "output_port": "Output port",
+          "manual_fixtures": "Manual fixtures"
+        },
+        "data_description": {
+          "hosts": "One IPv4 address per line. A new address is polled before it is saved. Removing an address stops sending to that supply.",
+          "protocol": "PORTOUT is KiNET v2. DMXOUT is KiNET v1.",
+          "portout_version": "1 writes 01 00 (OLA). 2 writes 02 00 (Haukcode). Ignored for DMXOUT.",
+          "output_port": "Physical output on the Data Enabler, 1 to 16. This supply uses port 1. Ignored for DMXOUT.",
+          "manual_fixtures": "One fixture per line if discovery misses it: serial_or_label, dmx_start[, label]. DMX start is 1-based, as QuickPlay shows it. An 8-digit hex token is a serial. With more than one supply, start the line with the supply IP. Example: 880055BE, 1, Oak left"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach {host}. The new address was not saved. Only a read-only supply poll was sent.",
+      "invalid_host": "Enter one or more IPv4 unicast addresses, one per line.",
+      "no_hosts": "Leave at least one Data Enabler address.",
+      "already_configured": "One of these Data Enablers is already configured on another entry.",
+      "invalid_manual": "{detail}"
+    }
+  },
+  "entity": {
+    "button": {
+      "rescan": {
+        "name": "Rescan fixtures"
+      }
+    }
+  },
+  "exceptions": {
+    "scan_in_progress": {
+      "message": "A fixture scan is already running on {host}."
+    }
+  },
+  "issues": {
+    "scan_failed": {
+      "title": "Fixture scan failed for {host}",
+      "description": "The Data Enabler did not return a fixture list. Fixtures found earlier were left in place. Check the network and press Rescan fixtures. The scan is read-only, but it takes about 14 seconds and may blink fixtures."
+    },
+    "supply_unreachable": {
+      "title": "Data Enabler {host} did not answer",
+      "description": "A read-only supply poll got no reply. Light commands are still sent to the last known address. Discovery results were not cleared."
+    }
+  },
+  "selector": {
+    "protocol": {
+      "options": {
+        "portout": "KiNET v2 PORTOUT",
+        "dmxout": "KiNET v1 DMXOUT"
+      }
+    },
+    "portout_version": {
+      "options": {
+        "1": "1 (01 00, OLA)",
+        "2": "2 (02 00, Haukcode)"
+      }
+    }
+  }
+}
