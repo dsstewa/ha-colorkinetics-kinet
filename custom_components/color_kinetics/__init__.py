@@ -6,6 +6,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import PLATFORMS
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub
+from .migrate import async_migrate_entry as async_migrate_entry
 
 
 async def async_setup_entry(

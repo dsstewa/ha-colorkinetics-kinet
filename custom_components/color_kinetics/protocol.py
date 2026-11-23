@@ -20,6 +20,8 @@ import logging
 import struct
 from typing import Any
 
+from .properties import supply_serial_hex
+
 _LOGGER = logging.getLogger(__name__)
 
 MAGIC = 0x4ADC0104
@@ -385,7 +387,7 @@ def parse_poll_reply(data: bytes) -> SupplyInfo:
         mac=mac,
         protocol_version=protocol_version,
         serial=serial,
-        serial_hex=f"{struct.unpack_from('<I', serial)[0]:08X}",
+        serial_hex=supply_serial_hex(serial),
         manufacturer=fields.get("M", ""),
         model=fields.get("D", ""),
         firmware_part=fields.get("#", ""),

@@ -104,7 +104,9 @@ def _title(supplies: dict[str, dict[str, Any]], hosts: list[str]) -> str:
 class ColorKineticsConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up one or more Data Enablers."""
 
-    VERSION = 1
+    # Version 2 rewrites the 0.1.0 16-hex supply serial to the 8-hex form.
+    VERSION = 2
+    MINOR_VERSION = 1
 
     @staticmethod
     @callback

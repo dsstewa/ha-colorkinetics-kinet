@@ -6,7 +6,7 @@ Reads use the existing allow-list: supply `0x0105` and fixture `0x0203`. They ru
 
 ## Supply serial
 
-The poll reply (`0x0002`) carries eight serial bytes `83 eb 00 7f 00 00 00 00`. QuickPlay shows `7F00EB83`, which is the first four bytes as a little-endian word (`0x7F00EB83`). That is the serial stored on the device. Name, IP, MAC, and firmware `SFT-000155-00 V34` come from the same poll reply.
+The poll reply (`0x0002`) carries eight serial bytes `83 eb 00 7f 00 00 00 00`. QuickPlay shows `7F00EB83`, which is the first four bytes as a little-endian word (`0x7F00EB83`). That is the serial stored on the device. 0.1.0 stored the raw eight bytes as `83EB007F00000000`. Config entry version 2 rewrites that value, the supply device identifier, and entity unique ids that start with it. Fixture serials are already eight hex digits and are not rewritten. Name, IP, MAC, and firmware `SFT-000155-00 V34` come from the same poll reply.
 
 ## Confirmed
 

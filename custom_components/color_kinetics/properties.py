@@ -45,6 +45,20 @@ def supply_serial_hex(serial: bytes) -> str:
     return f"{struct.unpack_from('<I', serial)[0]:08X}"
 
 
+def canonical_supply_serial(serial_hex: str) -> str:
+    """Return the 8-hex supply serial, including the 0.1.0 16-hex form.
+
+    0.1.0 stored the eight raw poll bytes (``83EB007F00000000``). The
+    QuickPlay serial is the first four of those bytes, little-endian
+    (``7F00EB83``). An 8-character value is already canonical, which is
+    also why fixture serials are not rewritten.
+    """
+    text = serial_hex.strip().upper()
+    if len(text) == 16 and all(char in "0123456789ABCDEF" for char in text):
+        return supply_serial_hex(bytes.fromhex(text))
+    return text
+
+
 def model_name(type_code: int | None) -> str:
     """Product name for a fixture type code. Unknown codes stay generic."""
     if type_code is None:
