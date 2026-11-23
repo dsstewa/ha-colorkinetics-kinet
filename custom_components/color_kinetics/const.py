@@ -25,4 +25,4 @@ CHANNELS_PER_FIXTURE: Final = 3
 MAX_FPS: Final = 40
 KEEPALIVE_SECONDS: Final = 1.0
 
-PLATFORMS: Final = ["light", "button"]
+PLATFORMS: Final = ["light", "button", "sensor"]

@@ -16,6 +16,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 
@@ -33,11 +34,23 @@ from .entry_data import (
     supplies_of,
 )
 from .manual import ManualFixture, ManualFixtureError, parse_manual_fixtures
+from .properties import (
+    COMMON_FIXTURE_PROPS,
+    GEN4_FIXTURE_PROPS,
+    SUFFIX_ALL_FIXTURES,
+    SUFFIX_DMX,
+    SUFFIX_POWER_TIME,
+    SUFFIX_RAW,
+    SUFFIX_SCALE,
+    SUFFIX_STARTUP,
+    SUPPLY_PROPS,
+    TYPE_BLAST,
+    model_name,
+)
 from .protocol import (
     DMX_SLOTS,
     KiNetClient,
     KiNetError,
-    KiNetTimeoutError,
     SupplyInfo,
     build_dmxout,
     build_portout,
@@ -49,7 +62,6 @@ from .pump import FramePump
 
 _LOGGER = logging.getLogger(__name__)
 
-_FIXTURE_PROPS = (0x40, 0x41, 0x05)
 _STORAGE_VERSION = 1
 
 Listener = Any
@@ -91,9 +103,7 @@ class Fixture:
     @property
     def model(self) -> str:
         """Expose the fixture type code. The two captured types differ."""
-        if self.type_code is None:
-            return "Color Kinetics fixture"
-        return f"Type 0x{self.type_code:02X}"
+        return model_name(self.type_code)
 
 
 def _fixture_from_dict(raw: dict[str, Any]) -> Fixture:
@@ -151,6 +161,7 @@ class ColorKineticsHub:
         self._buffers: dict[str, bytearray] = {}
         self._span: dict[str, int] = {}
         self._listeners: list[Listener] = []
+        self._light_listeners: list[Listener] = []
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
         self._stopped = False
@@ -207,6 +218,52 @@ class ColorKineticsHub:
         """Unique id of the rescan button for one supply."""
         return f"{self.supply_identifier(host)}:rescan"
 
+    def all_fixtures_unique_id(self, host: str) -> str:
+        """Unique id of the group light for one supply."""
+        return f"{self.supply_identifier(host)}:{SUFFIX_ALL_FIXTURES}"
+
+    def supply_device_info(self, host: str) -> DeviceInfo:
+        """Device registry record shared by the supply's entities."""
+        info = self._supplies.get(host) or {}
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.supply_identifier(host))},
+            name=self.supply_name(host),
+            manufacturer=info.get("manufacturer") or MANUFACTURER,
+            model=info.get("model") or "Data Enabler",
+            sw_version=info.get("firmware") or None,
+            serial_number=info.get("serial_hex"),
+        )
+
+    def fixture_device_info(self, fixture: Fixture) -> DeviceInfo:
+        """Device registry record for one fixture. Firmware is not in the capture."""
+        info = DeviceInfo(
+            identifiers={(DOMAIN, fixture.key)},
+            name=fixture.display_name,
+            manufacturer=MANUFACTURER,
+            model=fixture.model,
+            serial_number=fixture.serial_hex,
+        )
+        via = self.supply_device_id(fixture.host)
+        if via:
+            info["via_device_id"] = via
+        return info
+
+    def supply_properties(self, host: str) -> dict[str, str]:
+        """Raw supply-property values from the last read, keyed by hex id."""
+        info = self._supplies.get(host) or {}
+        stored = info.get("properties") or {}
+        return {str(key): str(value) for key, value in stored.items()}
+
+    def supply_property(self, host: str, prop: int) -> bytes | None:
+        """One supply property value, or None when that read did not answer."""
+        raw = self.supply_properties(host).get(f"{prop:04X}")
+        if raw is None:
+            return None
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return None
+
     def add_listener(self, listener: Listener) -> Any:
         """Subscribe to fixture-list changes. Returns an unsubscribe callback."""
         self._listeners.append(listener)
@@ -216,6 +273,21 @@ class ColorKineticsHub:
                 self._listeners.remove(listener)
 
         return _remove
+
+    def add_light_listener(self, listener: Listener) -> Any:
+        """Subscribe to individual light state changes."""
+        self._light_listeners.append(listener)
+
+        def _remove() -> None:
+            if listener in self._light_listeners:
+                self._light_listeners.remove(listener)
+
+        return _remove
+
+    def notify_light_states(self) -> None:
+        """Tell group lights that a member changed color or availability."""
+        for listener in list(self._light_listeners):
+            listener()
 
     def _notify(self) -> None:
         for listener in list(self._listeners):
@@ -284,6 +356,7 @@ class ColorKineticsHub:
             self._ports[host] = [
                 {"id": port.port_id, "type": port.port_type} for port in ports.ports
             ]
+            await self._read_supply_properties(host)
             records = await self.client.scan_fixtures(host)
             serials: list[int] = []
             seen: set[int] = set()
@@ -300,32 +373,62 @@ class ColorKineticsHub:
             self._delete_issue("scan_failed", host)
             await self._save()
 
+    async def _read_supply_properties(self, host: str) -> None:
+        """Read the supply properties QuickPlay reads. One miss does not stop the rest."""
+        found: dict[str, str] = {}
+        for prop in SUPPLY_PROPS:
+            try:
+                reply = await self.client.read_supply_property(host, prop)
+            except (KiNetError, OSError) as err:
+                _LOGGER.debug("Supply %s property %#06x failed: %s", host, prop, err)
+                continue
+            found[f"{prop:04X}"] = reply.value.hex()
+        self._supplies.setdefault(host, {})["properties"] = found
+
     async def _read_fixture_properties(self, host: str, serial: int) -> dict[int, int]:
         found: dict[int, int] = {}
-        for prop in _FIXTURE_PROPS:
-            try:
-                reply = await self.client.read_fixture_property(host, serial, prop)
-            except KiNetTimeoutError:
-                _LOGGER.debug(
-                    "Fixture %s did not answer property %#04x",
-                    format_fixture_serial(serial),
-                    prop,
-                )
-                continue
-            if reply.status != 0x09:
-                _LOGGER.debug(
-                    "Fixture %s property %#04x status %#04x is not usable",
-                    format_fixture_serial(serial),
-                    prop,
-                    reply.status,
-                )
-                continue
-            found[prop] = reply.value
+        for prop in COMMON_FIXTURE_PROPS:
+            value = await self._read_one_fixture_property(host, serial, prop)
+            if value is not None:
+                found[prop] = value
+        if found.get(0x05) == TYPE_BLAST:
+            for prop in GEN4_FIXTURE_PROPS:
+                value = await self._read_one_fixture_property(host, serial, prop)
+                if value is not None:
+                    found[prop] = value
         return found
+
+    async def _read_one_fixture_property(
+        self, host: str, serial: int, prop: int
+    ) -> int | None:
+        """One fixture property. Timeout and a bad status are missing, not fatal."""
+        try:
+            reply = await self.client.read_fixture_property(host, serial, prop)
+        except (KiNetError, OSError) as err:
+            _LOGGER.debug(
+                "Fixture %s property %#04x failed: %s",
+                format_fixture_serial(serial),
+                prop,
+                err,
+            )
+            return None
+        if reply.status != 0x09:
+            _LOGGER.debug(
+                "Fixture %s property %#04x status %#04x is not usable",
+                format_fixture_serial(serial),
+                prop,
+                reply.status,
+            )
+            return None
+        return reply.value
 
     async def _poll(self, host: str) -> SupplyInfo:
         info = await self.client.poll_supply(host)
-        self._supplies[host] = supply_entry_dict(info)
+        previous = self._supplies.get(host) or {}
+        stored = supply_entry_dict(info)
+        if previous.get("properties"):
+            stored["properties"] = previous["properties"]
+        self._supplies[host] = stored
         self._register_supply_devices()
         _LOGGER.info(
             "Data Enabler %s %s firmware %s",
@@ -436,20 +539,32 @@ class ColorKineticsHub:
             properties={},
         )
 
-    def write_channels(self, host: str, start: int, data: bytes) -> None:
-        """Write channel bytes into the supply buffer and schedule a send."""
+    def write_channels(
+        self, host: str, start: int, data: bytes, *, schedule: bool = True
+    ) -> bool:
+        """Write channel bytes into the supply buffer and, by default, schedule a send."""
         if host not in self.hosts:
-            return
+            return False
         end = start + len(data)
         if start < 0 or end > DMX_SLOTS:
             _LOGGER.warning(
                 "DMX channels %s-%s on %s are outside 1-512", start + 1, end, host
             )
-            return
+            return False
         buffer = self._buffers.setdefault(host, bytearray(DMX_SLOTS))
         buffer[start:end] = data
         self._span[host] = max(self._span.get(host, 0), end)
-        self.pump.mark_dirty(host)
+        if schedule:
+            self.pump.mark_dirty(host)
+        return True
+
+    def write_same_channels(self, host: str, starts: list[int], data: bytes) -> None:
+        """Write one payload at several DMX starts and schedule a single send."""
+        wrote = False
+        for start in starts:
+            wrote = self.write_channels(host, start, data, schedule=False) or wrote
+        if wrote:
+            self.pump.mark_dirty(host)
 
     def _fixture_span(self, host: str) -> int:
         end = 0
@@ -550,9 +665,28 @@ class ColorKineticsHub:
                 kwargs["via_device_id"] = via
             registry.async_get_or_create(**kwargs)
 
+    def _persistent_unique_ids(self) -> set[str]:
+        """Entity ids that must survive a restart's stale-entry cleanup."""
+        keep = {fixture.key for fixture in self._fixtures.values()}
+        for host in self.hosts:
+            ident = self.supply_identifier(host)
+            keep.add(self.button_unique_id(host))
+            keep.add(self.all_fixtures_unique_id(host))
+            keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
+            keep.add(f"{ident}:{SUFFIX_RAW}")
+        for fixture in self._fixtures.values():
+            if not fixture.serial_hex or fixture.source == "manual":
+                continue
+            key = fixture.serial_hex
+            keep.add(f"{key}:{SUFFIX_DMX}")
+            keep.add(f"{key}:{SUFFIX_STARTUP}")
+            keep.add(f"{key}:{SUFFIX_RAW}")
+            if fixture.type_code == TYPE_BLAST:
+                keep.add(f"{key}:{SUFFIX_SCALE}")
+        return keep
+
     def _drop_stale_registry_entries(self) -> None:
-        keep_entities = {fixture.key for fixture in self._fixtures.values()}
-        keep_entities.update(self.button_unique_id(host) for host in self.hosts)
+        keep_entities = self._persistent_unique_ids()
         entity_registry = er.async_get(self.hass)
         for entity in er.async_entries_for_config_entry(
             entity_registry, self.entry.entry_id

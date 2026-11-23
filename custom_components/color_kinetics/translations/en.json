@@ -57,6 +57,28 @@
       "rescan": {
         "name": "Rescan fixtures"
       }
+    },
+    "light": {
+      "all_fixtures": {
+        "name": "All fixtures"
+      }
+    },
+    "sensor": {
+      "power_time": {
+        "name": "Power time"
+      },
+      "dmx_address": {
+        "name": "DMX address"
+      },
+      "startup_channels": {
+        "name": "Startup channels"
+      },
+      "scale_factors": {
+        "name": "Channel scale factors"
+      },
+      "raw_properties": {
+        "name": "Raw properties"
+      }
     }
   },
   "exceptions": {

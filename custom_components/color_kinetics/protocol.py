@@ -291,11 +291,7 @@ def build_port_list(sequence: int) -> bytes:
 
 
 def build_supply_property_read(sequence: int, prop: int) -> bytes:
-    """Build a 16-byte supply property read (type 0x0105).
-
-    The hub does not call this. It exists so the captured reads can be
-    reproduced and so the allow-list covers a property read.
-    """
+    """Build a 16-byte supply property read (type 0x0105)."""
     return _encode_header(TYPE_READ_SUPPLY_PROP, sequence) + struct.pack(
         "<I", prop & 0xFFFFFFFF
     )
@@ -389,7 +385,7 @@ def parse_poll_reply(data: bytes) -> SupplyInfo:
         mac=mac,
         protocol_version=protocol_version,
         serial=serial,
-        serial_hex=serial.hex().upper(),
+        serial_hex=f"{struct.unpack_from('<I', serial)[0]:08X}",
         manufacturer=fields.get("M", ""),
         model=fields.get("D", ""),
         firmware_part=fields.get("#", ""),
@@ -702,6 +698,18 @@ class KiNetClient:
             host, build_port_list(sequence), TYPE_PORT_LIST_REPLY, self.poll_timeout
         )
         return parse_port_list(payload)
+
+    async def read_supply_property(self, host: str, prop: int) -> SupplyProperty:
+        """Read one supply property. Raises if the reply names a different one."""
+        sequence = self.allocate_sequence()
+        packet = build_supply_property_read(sequence, prop)
+        payload = await self.request(
+            host, packet, TYPE_SUPPLY_PROP_REPLY, self.prop_timeout
+        )
+        parsed = parse_supply_property(payload)
+        if parsed.prop != (prop & 0xFFFF):
+            raise ProtocolError("supply property reply did not match the request")
+        return parsed
 
     async def read_fixture_property(
         self, host: str, serial: int, prop: int

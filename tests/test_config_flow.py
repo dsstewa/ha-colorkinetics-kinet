@@ -21,7 +21,7 @@ from custom_components.color_kinetics.protocol import KiNetTimeoutError, SupplyI
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations", "fake_udp")
 
 
-def _supply(host: str, serial: str = "83EB007F00000000") -> SupplyInfo:
+def _supply(host: str, serial: str = "7F00EB83") -> SupplyInfo:
     return SupplyInfo(
         ip=host,
         mac="00:0a:c5:47:1f:7f",
@@ -46,7 +46,7 @@ def probes(monkeypatch):
         calls.append(host)
         if host.endswith(".99"):
             raise KiNetTimeoutError(host)
-        serial = "83EB007F00000000" if host == "172.16.10.41" else "1111111100000000"
+        serial = "7F00EB83" if host == "172.16.10.41" else "1111111100000000"
         return _supply(host, serial)
 
     monkeypatch.setattr(flow_module, "async_probe_host", _probe)
@@ -69,7 +69,7 @@ async def test_user_flow_creates_an_entry_for_one_or_more_supplies(hass, probes)
     assert result["options"]["protocol"] == "portout"
     assert result["options"]["portout_version"] == 1
     assert result["options"]["output_port"] == 1
-    assert result["result"].unique_id == "83EB007F00000000"
+    assert result["result"].unique_id == "7F00EB83"
     await hass.async_block_till_done()
     assert probes == ["172.16.10.41", "172.16.10.42"]
 
@@ -112,7 +112,7 @@ async def test_user_flow_errors(hass, probes):
 async def test_user_flow_aborts_when_the_supply_serial_is_already_known(hass, probes):
     existing = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="83EB007F00000000",
+        unique_id="7F00EB83",
         data={"hosts": ["10.1.1.1"], "supplies": {"10.1.1.1": {"serial_hex": "DIFFERENT"}}},
         options={"hosts": ["10.1.1.1"], "supplies": {"10.1.1.1": {"serial_hex": "DIFFERENT"}}},
     )
@@ -132,7 +132,7 @@ async def test_same_serial_on_a_new_address_is_already_configured(hass, probes):
 
     async def _same(host: str, timeout: float | None = None) -> SupplyInfo:
         if host == "10.9.9.9":
-            return _supply(host, "83EB007F00000000")
+            return _supply(host, "7F00EB83")
         return _supply(host, "2222222200000000")
 
     # First entry owns the serial via its supplies dict, not only unique_id.
@@ -140,11 +140,11 @@ async def test_same_serial_on_a_new_address_is_already_configured(hass, probes):
         domain=DOMAIN,
         data={
             "hosts": ["10.1.1.1"],
-            "supplies": {"10.1.1.1": {"serial_hex": "83EB007F00000000"}},
+            "supplies": {"10.1.1.1": {"serial_hex": "7F00EB83"}},
         },
         options={
             "hosts": ["10.1.1.1"],
-            "supplies": {"10.1.1.1": {"serial_hex": "83EB007F00000000"}},
+            "supplies": {"10.1.1.1": {"serial_hex": "7F00EB83"}},
         },
         unique_id="something-else",
     )
@@ -228,7 +228,7 @@ async def test_replacing_the_supply_frees_its_serial_for_a_new_entry(hass, probe
     assert created["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     entry = created["result"]
-    assert entry.unique_id == "83EB007F00000000"
+    assert entry.unique_id == "7F00EB83"
 
     options = await hass.config_entries.options.async_init(entry.entry_id)
     saved = await hass.config_entries.options.async_configure(
@@ -253,7 +253,7 @@ async def test_replacing_the_supply_frees_its_serial_for_a_new_entry(hass, probe
         again["flow_id"], {CONF_HOSTS: "172.16.10.41"}
     )
     assert reused["type"] is FlowResultType.CREATE_ENTRY
-    assert reused["result"].unique_id == "83EB007F00000000"
+    assert reused["result"].unique_id == "7F00EB83"
     await hass.async_block_till_done()
 
 

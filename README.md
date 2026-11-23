@@ -12,7 +12,7 @@ Outgoing datagrams are checked against an allow-list before they hit the socket:
 |---|---|
 | Supply poll | `0x0001` |
 | Port list | `0x000a` |
-| Supply property read | `0x0105` (encoder only; the hub does not send it) |
+| Supply property read | `0x0105` (setup and rescan only) |
 | Fixture property read | `0x0203` |
 | Fixture scan | `0x0207` |
 | Light data | `0x0101` DMXOUT or `0x0108` PORTOUT |
@@ -31,10 +31,12 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 
 ## What you get
 
-- One device per Data Enabler (model, firmware, MAC) and a **Rescan fixtures** button on it.
+- One device per Data Enabler (model, firmware, MAC, serial `7F00EB83`) and a **Rescan fixtures** button on it.
+- An **All fixtures** light on that device. It sets every available discovered fixture to the same color in one frame.
 - One device and one `light` per fixture, keyed by serial (`880055BE`, …). Renames and areas stick across restarts and rescans.
 - RGB color and brightness (`ColorMode.RGB`). State is optimistic and restored after a restart.
-- Two fixture type codes from this rig (`0x18` and `0x04`) show up as the device model (`Type 0x18`, `Type 0x04`). A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
+- Fixture type `0x18` is **Blast PowerCore gen4 3-Ch**. Type `0x04` is **iW/iColor Burst Powercore**. A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
+- Diagnostic sensors for the fields QuickPlay's values confirmed: DMX address, startup channels, gen4 scale factors, and the supply power time. Other captured properties sit on **Raw properties** without a guessed name. See `docs/PROPERTIES.md`.
 - A fixture has to be missing from two scans in a row before it becomes unavailable. Its last channel values stay in the frame. It is not deleted.
 - Light frames go out on change, at most 40 per second, and the last frame is repeated about once a second so the Data Enabler keeps holding the color.
 

@@ -124,7 +124,11 @@ async def test_discovery_creates_a_light_per_fixture_of_both_types(hass, fake_ud
             (DOMAIN, f"{serial:08X}"), entry.entry_id
         )
         assert device is not None
-        assert device.model == f"Type 0x{type_code:02X}"
+        assert device.model == {
+            0x18: "Blast PowerCore gen4 3-Ch",
+            0x04: "iW/iColor Burst Powercore",
+        }[type_code]
+        assert device.sw_version is None
         assert device.via_device_id is not None
     assert len(states) == 8
     button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
@@ -135,6 +139,7 @@ async def test_discovery_creates_a_light_per_fixture_of_both_types(hass, fake_ud
     )
     assert supply.model == "Data Enabler Pro"
     assert supply.sw_version == "SFT-000155-00 V34"
+    assert supply.serial_number == SUPPLY_SERIAL
     for data, addr in fake_udp.sent:
         assert packet_type_of(data) in ALLOWED_OUTGOING_TYPES
         assert addr == (SUPPLY_HOST, 6038)
@@ -676,3 +681,168 @@ async def test_scan_in_progress_during_refresh_is_ignored(hass, fake_udp):
     finally:
         hub._locks[SUPPLY_HOST].release()
     assert _entity_id(hass, "light", "880055BE") is not None
+
+
+def _offsets(data: bytes, payload: bytes, *, skip: int | None = None) -> None:
+    for _serial, start, _type_code in FIXTURES:
+        if start == skip:
+            assert data[start : start + 3] == b"\x00\x00\x00"
+        else:
+            assert data[start : start + 3] == payload
+
+
+async def test_all_fixtures_paints_every_fixture_in_one_frame(hass, fake_udp):
+    await _setup(hass, _entry())
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    registry = er.async_get(hass)
+    group_entry = registry.async_get(group)
+    button_entry = registry.async_get(button)
+    assert group_entry.device_id == button_entry.device_id
+    assert group_entry.entity_category is None
+    assert "All fixtures" in hass.states.get(group).name
+
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00")
+    assert hass.states.get(group).state == STATE_ON
+    assert hass.states.get(group).attributes["rgb_color"] == (255, 0, 0)
+    assert hass.states.get(_entity_id(hass, "light", "88005B93")).attributes["rgb_color"] == (
+        255,
+        0,
+        0,
+    )
+
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "brightness": 128},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\x80\x00\x00",
+    )
+    _offsets(packet.data, b"\x80\x00\x00")
+    await asyncio.sleep(0.05)
+    assert len(_light_packets(fake_udp)) == before + 1
+
+    from homeassistant.components.light import DATA_COMPONENT
+
+    entity = hass.data[DATA_COMPONENT].get_entity(group)
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(hs_color=(0, 100), brightness=255)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00")
+    from homeassistant.util.color import color_xy_to_RGB
+
+    expected = scale_rgb(color_xy_to_RGB(0.3, 0.3), 255)
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(xy_color=(0.3, 0.3), brightness=255)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == expected,
+    )
+    _offsets(packet.data, expected)
+
+    kept = tuple(hass.states.get(group).attributes["rgb_color"])
+    one = _entity_id(hass, "light", "880055BE")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": one, "rgb_color": [0, 0, 255], "brightness": 255},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(group).state == STATE_ON
+    assert tuple(hass.states.get(group).attributes["rgb_color"]) == kept
+    assert kept != (0, 0, 255)
+
+    before = len(_light_packets(fake_udp))
+    await entity.async_turn_on(brightness=0)
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\x00\x00\x00",
+    )
+    _offsets(packet.data, b"\x00\x00\x00")
+    assert hass.states.get(group).state == STATE_OFF
+    assert hass.states.get(one).state == STATE_OFF
+    from homeassistant.const import STATE_UNAVAILABLE
+
+    hub = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
+    hub._fixtures.clear()
+    await entity.async_turn_on(rgb_color=(1, 2, 3))
+    assert hass.states.get(group).state == STATE_UNAVAILABLE
+
+
+async def test_all_fixtures_skips_an_unavailable_fixture_and_a_manual_one(hass, fake_udp, monkeypatch):
+    monkeypatch.setattr(
+        "custom_components.color_kinetics.protocol.PROP_TIMEOUT", 0.05
+    )
+    fake_udp.skip_props[0x88005B93] = {0x40}
+    await _setup(hass, _entry(manual_fixtures="Porch wash, 40"))
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    before = len(_light_packets(fake_udp))
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    packet = await _wait_light(
+        fake_udp,
+        lambda item: len(_light_packets(fake_udp)) == before + 1
+        and item.data[0:3] == b"\xff\x00\x00",
+    )
+    _offsets(packet.data, b"\xff\x00\x00", skip=6)
+    assert packet.data[39:42] == b"\x00\x00\x00"
+    assert hass.states.get(_entity_id(hass, "light", "88005B93")).state == STATE_UNAVAILABLE
+    await asyncio.sleep(0.05)
+    assert len(_light_packets(fake_udp)) == before + 1
+
+
+async def test_offline_88005b93_stays_until_a_second_scan_misses_it(hass, fake_udp):
+    await _setup(hass, _entry())
+    entity_id = _entity_id(hass, "light", "88005B93")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": entity_id, "rgb_color": [255, 0, 0], "brightness": 255},
+        blocking=True,
+    )
+    await _wait_light(fake_udp, lambda item: item.data[6:9] == b"\xff\x00\x00")
+    fake_udp.fixtures = [fixture for fixture in fake_udp.fixtures if fixture[0] != 0x88005B93]
+    button = _entity_id(hass, "button", f"{SUPPLY_SERIAL}:rescan")
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_ON
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    packet = await _wait_light(fake_udp, lambda item: item.data[6:9] == b"\xff\x00\x00")
+    assert packet.data[6:9] == b"\xff\x00\x00"
+    assert hass.states.get(_entity_id(hass, "sensor", "88005B93:dmx_address")).state == (
+        STATE_UNAVAILABLE
+    )

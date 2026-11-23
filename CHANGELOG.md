@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Add an **All fixtures** light on each Data Enabler. One frame sets every available discovered fixture.
+- Read confirmed KiNET properties during setup and rescan, and show them as diagnostic sensors. Unconfirmed ids stay on a Raw properties sensor.
+- Show the Data Enabler serial as the little-endian word `7F00EB83`.
+- Name fixtures from the type code: Blast PowerCore gen4 3-Ch and iW/iColor Burst Powercore. Fixture firmware is not in the capture, so `sw_version` is left unset.
+
 ## 0.1.0
 
 First release of the Philips Color Kinetics KiNET integration for Home Assistant.
