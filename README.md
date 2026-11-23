@@ -32,7 +32,8 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 ## What you get
 
 - One device per Data Enabler (model, firmware, MAC, serial `7F00EB83`) and a **Rescan fixtures** button on it.
-- An **All fixtures** light on that device. It sets every available discovered fixture to the same color in one frame.
+- An **All fixtures** light on that device. It sets every available discovered fixture to the same color in one frame, in the saved fixture order.
+- Named groups (Tree Run, Oaks, and so on) from the options flow. Each group is its own light, with a stable id, and follows its own fixture order.
 - One device and one `light` per fixture, keyed by serial (`880055BE`, …). Renames and areas stick across restarts and rescans.
 - RGB color and brightness (`ColorMode.RGB`). State is optimistic and restored after a restart.
 - Fixture type `0x18` is **Blast PowerCore gen4 3-Ch**. Type `0x04` is **iW/iColor Burst Powercore**. A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
@@ -41,6 +42,30 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 - Light frames go out on change, at most 40 per second, and the last frame is repeated about once a second so the Data Enabler keeps holding the color.
 
 A scan takes about 14 seconds. It runs once per supply that has never completed a scan, and when you press the button. It is not polled.
+
+## Fixture order, groups, and effects
+
+Open **Configure** on the integration entry.
+
+- **Light output** is the host, protocol, and manual-fixture form.
+- **Fixture order** is a drag-and-drop list of the discovered fixture lights (`reorder` on an entity selector). The saved value is the serial list. Renames do not change it. A fixture found later is added at the end, sorted by DMX address. A fixture that drops off a scan keeps its place in the list.
+- **Groups** adds, renames, reorders, or deletes a named group. Deleting a group removes its light. The group's id does not change when you rename it.
+
+All fixtures and each group light accept an effect:
+
+| Effect | What it does |
+|---|---|
+| Solid | One color. This also stops an effect on that light. |
+| Color wheel | Every fixture in the run cycles hue together. |
+| Rainbow chase | Same cycle, with a hue offset per fixture along the order. |
+| Color chase | The light's color runs along the order; the other fixtures in the run go dark. |
+| Theater chase | Every third fixture, stepping along the order. |
+| Alternate | Even and odd fixtures swap. |
+| Breathe | The light's color fades in and out together. |
+
+**Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. Unavailable fixtures are left out of the pattern and are not written, so a missed fixture is not zeroed.
+
+A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns.
 
 ## Options
 

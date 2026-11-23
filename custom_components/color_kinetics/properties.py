@@ -36,6 +36,7 @@ SUFFIX_RAW = "raw_properties"
 SUFFIX_DMX = "dmx_address"
 SUFFIX_STARTUP = "startup_channels"
 SUFFIX_SCALE = "scale_factors"
+SUFFIX_EFFECT_SPEED = "effect_speed"
 
 
 def supply_serial_hex(serial: bytes) -> str:

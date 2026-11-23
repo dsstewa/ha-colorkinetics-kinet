@@ -8,8 +8,10 @@ scanned, and again when the user presses Rescan. It is not polled.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, replace
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +24,9 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     CHANNELS_PER_FIXTURE,
+    CONF_FIXTURE_ORDER,
+    CONF_GROUPS,
+    DEFAULT_EFFECT_SPEED,
     DOMAIN,
     KEEPALIVE_SECONDS,
     MANUFACTURER,
@@ -34,11 +39,14 @@ from .entry_data import (
     supplies_of,
 )
 from .manual import ManualFixture, ManualFixtureError, parse_manual_fixtures
+from .effects import EffectEngine
+from .order import effective_order
 from .properties import (
     COMMON_FIXTURE_PROPS,
     GEN4_FIXTURE_PROPS,
     SUFFIX_ALL_FIXTURES,
     SUFFIX_DMX,
+    SUFFIX_EFFECT_SPEED,
     SUFFIX_POWER_TIME,
     SUFFIX_RAW,
     SUFFIX_SCALE,
@@ -162,6 +170,10 @@ class ColorKineticsHub:
         self._span: dict[str, int] = {}
         self._listeners: list[Listener] = []
         self._light_listeners: list[Listener] = []
+        self.effects = EffectEngine()
+        self._effect_task: asyncio.Task[None] | None = None
+        self._effect_ready = asyncio.Event()
+        self._speeds: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
         self._stopped = False
@@ -221,6 +233,110 @@ class ColorKineticsHub:
     def all_fixtures_unique_id(self, host: str) -> str:
         """Unique id of the group light for one supply."""
         return f"{self.supply_identifier(host)}:{SUFFIX_ALL_FIXTURES}"
+
+    def all_fixtures_owner(self, host: str) -> str:
+        """Effect owner id for the All fixtures light on one supply."""
+        return self.all_fixtures_unique_id(host)
+
+    def group_owner(self, group_id: str) -> str:
+        """Effect owner id for a named group. Stable for the life of the group."""
+        return f"group:{group_id}"
+
+    def fixture_order(self) -> list[str]:
+        """User order, with new discoveries appended by DMX address."""
+        saved = [
+            str(serial)
+            for serial in self.entry.options.get(CONF_FIXTURE_ORDER) or []
+        ]
+        discovered: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for fixture in self.fixtures():
+            if not fixture.serial_hex or fixture.source == "manual" or fixture.serial_hex in seen:
+                continue
+            seen.add(fixture.serial_hex)
+            address = fixture.dmx_start if fixture.dmx_start is not None else 1_000_000
+            discovered.append((fixture.serial_hex, address))
+        return effective_order(saved, discovered)
+
+    def light_groups(self) -> list[dict[str, Any]]:
+        """Named groups from options. Each has id, name, and member serials."""
+        groups: list[dict[str, Any]] = []
+        for raw in self.entry.options.get(CONF_GROUPS) or []:
+            if not isinstance(raw, dict) or not raw.get("id"):
+                continue
+            members = [str(serial) for serial in raw.get("members") or []]
+            groups.append(
+                {"id": str(raw["id"]), "name": str(raw.get("name") or "Group"), "members": members}
+            )
+        return groups
+
+    def group_device_info(self, group: dict[str, Any]) -> DeviceInfo:
+        """Attach a group to the Data Enabler of its first known fixture."""
+        for serial in group.get("members") or []:
+            fixture = self.get_fixture(str(serial))
+            if fixture is not None and fixture.host in self._supply_device_ids:
+                return self.supply_device_info(fixture.host)
+        if self.hosts:
+            return self.supply_device_info(self.hosts[0])
+        return DeviceInfo(identifiers={(DOMAIN, self.group_owner(str(group["id"])))})
+
+    def effect_speed(self, owner: str) -> float:
+        """Slider value for an effect owner. Missing sliders use the default."""
+        return float(self._speeds.get(owner, DEFAULT_EFFECT_SPEED))
+
+    def set_effect_speed(self, owner: str, speed: float) -> None:
+        """Update the speed. A running effect uses it on the next frame."""
+        self._speeds[owner] = float(speed)
+        run = self.effects.runs.get(owner)
+        if run is not None:
+            run.speed = float(speed)
+
+    def effect_clock(self) -> float:
+        """Monotonic time base for effect frames."""
+        return time.monotonic()
+
+    def ensure_effect_loop(self) -> None:
+        """Start the single effect task if it is not already running."""
+        if self._effect_task is None or self._effect_task.done():
+            self._effect_task = asyncio.create_task(
+                self._effect_loop(), name="color_kinetics effects"
+            )
+        self._effect_ready.set()
+
+    def render_effects(self, now: float) -> None:
+        """Write one effect frame into the buffers and schedule a send."""
+
+        def dmx_of(key: str):
+            fixture = self.get_fixture(key)
+            return fixture.host, fixture.dmx_start  # type: ignore[union-attr]
+
+        def available(key: str) -> bool:
+            fixture = self.get_fixture(key)
+            return bool(fixture and self.is_available(fixture))
+
+        for host, regions in self.effects.frames(now, dmx_of, available).items():
+            wrote = False
+            for start, payload in regions:
+                wrote = self.write_channels(host, start, payload, schedule=False) or wrote
+            if wrote:
+                self.pump.mark_dirty(host)
+
+    def release_fixture_effect(self, key: str) -> None:
+        """Drop a fixture out of any running effect. Latest manual command wins."""
+        self.effects.release_fixture(key)
+
+    async def _effect_loop(self) -> None:
+        """Render animated effects at the frame cap. Idle until one starts."""
+        try:
+            while True:
+                if self.effects.active:
+                    self.render_effects(self.effect_clock())
+                    await asyncio.sleep(1 / MAX_FPS)
+                else:
+                    await self._effect_ready.wait()
+                    self._effect_ready.clear()
+        except asyncio.CancelledError:
+            raise
 
     def supply_device_info(self, host: str) -> DeviceInfo:
         """Device registry record shared by the supply's entities."""
@@ -310,6 +426,14 @@ class ColorKineticsHub:
             return
         self._stopped = True
         self._clear_issues()
+        self.effects.runs.clear()
+        self.effects.owners.clear()
+        task = self._effect_task
+        self._effect_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await self.pump.stop()
         await self._save()
         await self.client.stop()
@@ -672,8 +796,12 @@ class ColorKineticsHub:
             ident = self.supply_identifier(host)
             keep.add(self.button_unique_id(host))
             keep.add(self.all_fixtures_unique_id(host))
+            keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_SPEED}")
             keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
             keep.add(f"{ident}:{SUFFIX_RAW}")
+        for group in self.light_groups():
+            keep.add(self.group_owner(group["id"]))
+            keep.add(f"{self.group_owner(group['id'])}:{SUFFIX_EFFECT_SPEED}")
         for fixture in self._fixtures.values():
             if not fixture.serial_hex or fixture.source == "manual":
                 continue
