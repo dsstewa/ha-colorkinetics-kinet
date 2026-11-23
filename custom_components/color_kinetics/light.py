@@ -267,8 +267,17 @@ class FixtureLight(RestoreEntity, LightEntity):
         self.async_write_ha_state()
         self._hub.notify_light_states()
 
-    def apply_look(self, saved: dict[str, Any], transition: float) -> None:
-        """Restore one fixture from a look. A missing fixture is never passed in."""
+    def apply_look(
+        self,
+        saved: dict[str, Any],
+        transition: float,
+        channel_target: bytes | None = None,
+    ) -> None:
+        """Restore one fixture from a look. A missing fixture is never passed in.
+
+        ``channel_target`` is the bytes to fade toward. An effect recall passes
+        the effect's first frame so a stale saved color is not the target.
+        """
         rgb = saved.get("rgb") or (255, 255, 255)
         self._attr_rgb_color = tuple(int(channel) for channel in rgb)
         if saved.get("brightness") is not None:
@@ -277,10 +286,11 @@ class FixtureLight(RestoreEntity, LightEntity):
         self._attr_color_mode = ColorMode.RGB
         self._hub.release_fixture_effect(self._key)
         self._hub.cancel_fades([self._key])
+        payload = self._channels() if channel_target is None else bytes(channel_target)
         if transition > 0:
-            self._hub.start_fade(self._key, self._channels(), transition)
+            self._hub.start_fade(self._key, payload, transition)
         else:
-            self._push()
+            self._hub.start_fade(self._key, payload, 0)
         if self.hass is not None:
             self.async_write_ha_state()
 
@@ -415,8 +425,8 @@ class AllFixturesLight(LightEntity):
     def _remember_members(self, members: list[FixtureLight] | None = None) -> None:
         """Copy this light onto members it still owns.
 
-        A fixture this effect owns is on, at the effect's brightness. Its
-        previous color is kept. A fixture another effect owns is left alone.
+        A fixture this effect owns is on, at the effect's color and brightness.
+        A fixture another effect owns is left alone.
         """
         rgb = tuple(self._attr_rgb_color or (255, 255, 255))
         for member in self._members() if members is None else members:
@@ -427,6 +437,7 @@ class AllFixturesLight(LightEntity):
             if run is not None and member._key in run.order:
                 member._attr_is_on = True
                 member._attr_brightness = int(run.brightness)
+                member._attr_rgb_color = tuple(int(channel) for channel in run.rgb)
             else:
                 member._attr_is_on = bool(self._attr_is_on)
                 member._attr_rgb_color = rgb
@@ -541,13 +552,19 @@ class AllFixturesLight(LightEntity):
     ) -> None:
         """Fade each member up to the effect's first frame, then start it.
 
-        Members are on at the effect brightness while the channels fade, so a
-        look saved during the fade does not record them as off.
+        The effect that owns these fixtures is stopped first. Otherwise the
+        next effect frame cancels the fade and keeps painting the old effect.
+        Members are on at the new effect's color and brightness while the
+        channels fade, so a look saved during the fade does not record the
+        previous color.
         """
+        self._hub.effects.stop(self._owner_id)
         count = len(members)
         for index, member in enumerate(members):
+            self._hub.release_fixture_effect(member._key)
             member._attr_is_on = True
             member._attr_brightness = brightness
+            member._attr_rgb_color = rgb
             member._attr_color_mode = ColorMode.RGB
             target = fixture_channels(effect, index, count, 0.0, rgb, brightness)
             self._hub.cancel_fades([member._key])

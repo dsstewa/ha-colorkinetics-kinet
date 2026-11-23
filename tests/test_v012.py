@@ -18,6 +18,7 @@ from custom_components.color_kinetics.effects import (
     EFFECT_CANDY_CANE,
     EFFECT_CHRISTMAS,
     EFFECT_HALLOWEEN,
+    EFFECT_RAINBOW,
     EFFECT_RED_WHITE_BLUE,
     EFFECT_WARM_TWINKLE,
     EffectEngine,
@@ -322,7 +323,7 @@ async def test_looks_round_trip_across_reload_and_missing_fixtures(hass, hass_st
     )
     restored = hass.states.get(_entity_id(hass, "light", "880055BE"))
     assert restored.state == STATE_ON
-    assert restored.attributes["rgb_color"] == (255, 0, 0)
+    assert restored.attributes["rgb_color"] == (255, 255, 255)
     assert restored.attributes["brightness"] == 255
     assert bytes(hub._buffers[SUPPLY_HOST][3:6]) == before_missing
     hub.render_effects(0.0)
@@ -724,14 +725,80 @@ async def test_christmas_saved_from_off_does_not_fade_to_black(hass, monkeypatch
         blocking=True,
     )
     assert hub.fades.contains("880055BE")
+    from homeassistant.components.light import DATA_COMPONENT
+
+    group_light = hass.data[DATA_COMPONENT].get_entity(group)
+    members = group_light._members()
+    effect_rgb = tuple(hub._looks["Tree"]["lights"][owner]["rgb"])
+    expected = {
+        member._key: fixture_channels(
+            EFFECT_CHRISTMAS, index, len(members), 0.0, effect_rgb, 128
+        )
+        for index, member in enumerate(members)
+    }
+    assert hub.fades.target_of("880055BE") == expected["880055BE"]
+    assert hub.fades.target_of("88002CD9") == expected["88002CD9"]
+    assert expected["880055BE"] == b"\x80\x00\x00"
+    assert expected["88002CD9"] == b"\x00\x80\x00"
     started, duration = hub.fades.started_at("880055BE")
     hub.render_fades(started + duration)
-    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) != b"\x00\x00\x00"
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == expected["880055BE"]
+    assert bytes(hub._buffers[SUPPLY_HOST][3:6]) == expected["88002CD9"]
     assert hub._deferred
     hub.render_frame(min(item.deadline for item in hub._deferred))
     assert hub.effects.owners.get("880055BE") == owner
     hub.render_effects(0.0)
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x80\x00\x00"
+
+
+async def test_new_effect_transition_replaces_the_running_effect(hass, monkeypatch):
+    """A transition onto a new effect stops the old one instead of letting it paint."""
+    await _hold_frames(monkeypatch)
+    entry = await _setup(hass, _entry())
+    hub = entry.runtime_data
+    group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
+    from homeassistant.components.light import DATA_COMPONENT
+
+    members = hass.data[DATA_COMPONENT].get_entity(group)._members()
+    count = len(members)
+    white = (255, 255, 255)
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": group, "effect": EFFECT_RAINBOW, "brightness": 255},
+        blocking=True,
+    )
+    hub.render_effects(0.6)
+    rainbow = fixture_channels(EFFECT_RAINBOW, 0, count, 0.5, white, 255)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == rainbow
+    assert rainbow != b"\xff\x00\x00"
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": group,
+            "effect": EFFECT_CHRISTMAS,
+            "brightness": 255,
+            "transition": 4,
+        },
+        blocking=True,
+    )
+    assert "880055BE" not in hub.effects.owners
+    christmas = fixture_channels(EFFECT_CHRISTMAS, 0, count, 0.0, white, 255)
+    assert hub.fades.target_of("880055BE") == christmas
+    hub.render_effects(0.0)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == rainbow
+    started, duration = hub.fades.started_at("880055BE")
+    hub.render_fades(started + duration / 2)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == interpolate(rainbow, christmas, 0.5)
+    hub.render_effects(0.6)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == interpolate(rainbow, christmas, 0.5)
+    hub.render_fades(started + duration)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == christmas
+    hub.render_frame(min(item.deadline for item in hub._deferred))
+    assert hub.effects.runs[hub.all_fixtures_owner(SUPPLY_HOST)].effect == EFFECT_CHRISTMAS
+    hub.render_effects(0.0)
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == christmas
 
 
 async def test_animated_turn_on_fades_into_the_first_frame(hass, monkeypatch):

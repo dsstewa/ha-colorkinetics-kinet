@@ -74,7 +74,7 @@ Holiday effects use those colors rather than the light's color. Brightness still
 
 A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
 
-Fixture, group, and All fixtures lights accept a transition. The channels fade from what is on the wire to the new color, in the same frame loop (at most 40 times a second). The one-second keepalive and the send backoff are unchanged. Turning a light off with a transition fades those channels to zero. A newer command cancels the fade for the fixtures it takes and leaves every other fade running. Turning on an animated effect with a transition fades each fixture to that effect's first frame, then the effect runs.
+Fixture, group, and All fixtures lights accept a transition. The channels fade from what is on the wire to the new color, in the same frame loop (at most 40 times a second). The one-second keepalive and the send backoff are unchanged. Turning a light off with a transition fades those channels to zero. A newer command cancels the fade for the fixtures it takes and leaves every other fade running. Turning on an animated effect with a transition stops whatever effect those fixtures were in, fades each fixture to the new effect's first frame, then the effect runs. Recalling a look does the same for a saved effect: the fade target is that first frame.
 
 ## Saved looks
 

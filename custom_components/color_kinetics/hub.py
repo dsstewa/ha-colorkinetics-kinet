@@ -40,7 +40,7 @@ from .entry_data import (
     supplies_of,
 )
 from .manual import ManualFixture, ManualFixtureError, parse_manual_fixtures
-from .effects import EFFECT_SOLID, EffectEngine
+from .effects import EFFECT_NAMES, EFFECT_SOLID, EffectEngine, fixture_channels
 from .fade import FadeBook
 from .looks import find_look_name, normalize_look_name
 from .order import effective_order
@@ -567,6 +567,7 @@ class ColorKineticsHub:
             if run is not None and str(key) in run.order:
                 is_on = True
                 brightness = int(run.brightness)
+                rgb = tuple(int(channel) for channel in run.rgb)
             fixtures[str(key)] = {
                 "is_on": is_on,
                 "brightness": brightness,
@@ -652,6 +653,37 @@ class ColorKineticsHub:
         await self._save()
         self.notify_looks()
 
+    def _effect_first_frames(
+        self, raw_lights: dict[str, Any], allowed: set[str]
+    ) -> dict[str, bytes]:
+        """First frame of each saved animated effect, keyed by fixture.
+
+        Recall fades an effect-owned fixture toward this, not toward a color
+        the fixture entity still had from before the effect.
+        """
+        frames: dict[str, bytes] = {}
+        for owner, saved in raw_lights.items():
+            if not isinstance(saved, dict):
+                continue
+            effect = str(saved.get("effect") or EFFECT_SOLID)
+            if effect not in EFFECT_NAMES or effect == EFFECT_SOLID:
+                continue
+            light = self._light_for_owner(str(owner))
+            if light is None:
+                continue
+            members = [member for member in light._members() if member._key in allowed]
+            rgb = tuple(int(channel) for channel in (saved.get("rgb") or (255, 255, 255)))
+            try:
+                brightness = int(saved.get("brightness") if saved.get("brightness") is not None else 255)
+            except (TypeError, ValueError):
+                brightness = 255
+            count = len(members)
+            for index, member in enumerate(members):
+                frames[member._key] = fixture_channels(
+                    effect, index, count, 0.0, rgb, brightness
+                )
+        return frames
+
     def _apply_saved_speed(self, owner: str, speed: float) -> None:
         self.set_effect_speed(owner, speed)
         slider = self.speed_entities.get(owner)
@@ -688,13 +720,14 @@ class ColorKineticsHub:
         keys = [light._key for light, _saved in present]
         epoch = self.note_command(keys)
         duration = 0.0 if transition is None else max(0.0, float(transition))
-        for light, saved in present:
-            light.apply_look(saved, duration)
         raw_lights = look.get("lights") if isinstance(look, dict) else None
         if not isinstance(raw_lights, dict):
             raw_lights = {}
-        deferred: list[tuple[str, dict[str, Any]]] = []
         allowed = set(keys)
+        first_frames = self._effect_first_frames(raw_lights, allowed)
+        for light, saved in present:
+            light.apply_look(saved, duration, first_frames.get(light._key))
+        deferred: list[tuple[str, dict[str, Any]]] = []
         for owner, saved in raw_lights.items():
             if not isinstance(saved, dict):
                 continue

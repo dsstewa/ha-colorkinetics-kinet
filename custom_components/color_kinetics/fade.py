@@ -95,3 +95,10 @@ class FadeBook:
         if fade is None:
             return None
         return fade.started, fade.duration
+
+    def target_of(self, key: str) -> bytes | None:
+        """Channel bytes this fade is heading toward."""
+        fade = self._fades.get(key)
+        if fade is None:
+            return None
+        return fade.target
