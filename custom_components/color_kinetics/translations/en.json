@@ -103,6 +103,11 @@
         "name": "Effect speed"
       }
     },
+    "select": {
+      "look": {
+        "name": "Look"
+      }
+    },
     "sensor": {
       "power_time": {
         "name": "Power time"
@@ -124,6 +129,66 @@
   "exceptions": {
     "scan_in_progress": {
       "message": "A fixture scan is already running on {host}."
+    },
+    "duplicate_look": {
+      "message": "A look named {name} already exists."
+    },
+    "unknown_look": {
+      "message": "No look named {name} is saved."
+    },
+    "look_name": {
+      "message": "Enter a name for the look."
+    },
+    "look_target": {
+      "message": "Choose the Data Enabler when more than one Color Kinetics entry is loaded."
+    }
+  },
+  "services": {
+    "save_look": {
+      "name": "Save look",
+      "description": "Save the current fixture colors, brightness, and any running effect and speed as a named look.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name for this look. A name that matches an existing look in any case is rejected."
+        },
+        "device_id": {
+          "name": "Data Enabler",
+          "description": "Which entry to save when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
+        }
+      }
+    },
+    "recall_look": {
+      "name": "Recall look",
+      "description": "Restore a saved look. Fixtures that are no longer present are skipped.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name of the look to recall. Matching ignores case."
+        },
+        "transition": {
+          "name": "Transition",
+          "description": "Seconds to fade to the look. Leave empty to change at once."
+        },
+        "device_id": {
+          "name": "Data Enabler",
+          "description": "Which entry to recall when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
+        }
+      }
+    },
+    "delete_look": {
+      "name": "Delete look",
+      "description": "Delete a saved look. Matching ignores case.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name of the look to delete."
+        },
+        "device_id": {
+          "name": "Data Enabler",
+          "description": "Which entry to update when more than one Color Kinetics integration is loaded. Pick the Data Enabler. A fixture on that supply selects the same entry."
+        }
+      }
     }
   },
   "issues": {

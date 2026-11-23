@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Holiday effects on All fixtures and every group light: Christmas, Warm twinkle, Candy cane, Red white blue, and Halloween. They follow fixture order and the 1–10 speed slider. The latest command still owns a fixture.
+- Save the current colors, brightness, and any running effect and speed as a named look. Recall it from the Look selector on the Data Enabler, or with `color_kinetics.save_look`, `recall_look`, and `delete_look`. Looks are stored by serial in the existing cache, and a 0.1.1 cache is migrated in place. Duplicate names are rejected regardless of case. A fixture that is gone is skipped.
+- Transitions on fixture, group, and All fixtures lights, and on `recall_look`. The fade runs in the existing frame loop. A newer command cancels the fade for the fixtures it takes. An animated effect with a transition fades into its first frame, then runs.
+- Optional blueprint `blueprints/automation/color_kinetics/sunset_to_bedtime.yaml`. It is not installed automatically. Sunset can name a Data Enabler, and bedtime fades off the lights you choose for the look as well as the effect light.
+- A fixture owned by a running effect is on, at that effect's color and brightness. Recalling it fades toward the effect's first frame, not an older color. Starting another effect with a transition stops the one that was running, fades into the new first frame, then runs the new effect. The Look selector keeps its value across a restart. A fixture device passed as `device_id` selects that fixture's Data Enabler.
+
 ## 0.1.1
 
 - Add an **All fixtures** light on each Data Enabler. One frame sets every available discovered fixture.

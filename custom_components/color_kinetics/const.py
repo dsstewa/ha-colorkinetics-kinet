@@ -29,4 +29,4 @@ KEEPALIVE_SECONDS: Final = 1.0
 
 DEFAULT_EFFECT_SPEED: Final = 5
 
-PLATFORMS: Final = ["light", "button", "sensor", "number"]
+PLATFORMS: Final = ["light", "button", "sensor", "number", "select"]

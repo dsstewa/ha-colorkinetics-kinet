@@ -16,6 +16,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -39,7 +40,9 @@ from .entry_data import (
     supplies_of,
 )
 from .manual import ManualFixture, ManualFixtureError, parse_manual_fixtures
-from .effects import EffectEngine
+from .effects import EFFECT_NAMES, EFFECT_SOLID, EffectEngine, fixture_channels
+from .fade import FadeBook
+from .looks import find_look_name, normalize_look_name
 from .order import effective_order
 from .properties import (
     COMMON_FIXTURE_PROPS,
@@ -47,6 +50,7 @@ from .properties import (
     SUFFIX_ALL_FIXTURES,
     SUFFIX_DMX,
     SUFFIX_EFFECT_SPEED,
+    SUFFIX_LOOK,
     SUFFIX_POWER_TIME,
     SUFFIX_RAW,
     SUFFIX_SCALE,
@@ -71,9 +75,37 @@ from .pump import FramePump
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 
 Listener = Any
+
+
+class ColorKineticsStore(Store[dict[str, Any]]):
+    """Fixture cache. Version 2 adds named looks beside the saved channels."""
+
+    async def _async_migrate_func(
+        self,
+        old_major_version: int,
+        old_minor_version: int,
+        old_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Keep a 0.1.1 cache and add an empty look map."""
+        if isinstance(old_data, dict):
+            data = dict(old_data)
+        else:
+            data = {}
+        if old_major_version < STORAGE_VERSION and not isinstance(data.get("looks"), dict):
+            data["looks"] = {}
+        return data
+
+
+@dataclass
+class _DeferredEffects:
+    """Effects from a look that should start when its fade finishes."""
+
+    epoch: int
+    deadline: float
+    effects: list[tuple[str, dict[str, Any]]]
 
 
 class ScanInProgressError(KiNetError):
@@ -160,7 +192,7 @@ class ColorKineticsHub:
             keepalive=KEEPALIVE_SECONDS,
             send=self._transmit,
         )
-        self._store: Store[dict[str, Any]] = Store(
+        self._store: Store[dict[str, Any]] = ColorKineticsStore(
             hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}"
         )
         self._fixtures: dict[str, Fixture] = {}
@@ -173,9 +205,20 @@ class ColorKineticsHub:
         self._listeners: list[Listener] = []
         self._light_listeners: list[Listener] = []
         self.effects = EffectEngine()
+        self.fades = FadeBook()
         self._effect_task: asyncio.Task[None] | None = None
         self._effect_ready = asyncio.Event()
         self._speeds: dict[str, float] = {}
+        self._looks: dict[str, dict[str, Any]] = {}
+        self.selected_look: str | None = None
+        self._look_listeners: list[Listener] = []
+        self._command_epoch: dict[str, int] = {}
+        self._epoch = 0
+        self._deferred: list[_DeferredEffects] = []
+        self.fixture_lights: dict[str, Any] = {}
+        self.supply_lights: dict[str, Any] = {}
+        self.group_lights: dict[str, Any] = {}
+        self.speed_entities: dict[str, Any] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
         self._stopped = False
@@ -296,8 +339,16 @@ class ColorKineticsHub:
             run.speed = float(speed)
 
     def effect_clock(self) -> float:
-        """Monotonic time base for effect frames."""
+        """Monotonic time base for effect frames and fades."""
         return time.monotonic()
+
+    def _frame_delay(self) -> float:
+        """Seconds between animation frames. The pump still caps sends at this rate."""
+        return 1 / MAX_FPS
+
+    async def _sleep(self, delay: float) -> None:
+        """Wait between frames. Tests replace this to hold the loop still."""
+        await asyncio.sleep(delay)
 
     def ensure_effect_loop(self) -> None:
         """Start the single effect task if it is not already running."""
@@ -306,6 +357,107 @@ class ColorKineticsHub:
                 self._effect_loop(), name="color_kinetics effects"
             )
         self._effect_ready.set()
+
+    def _animating(self) -> bool:
+        """True while an effect, a fade, or a deferred look effect still needs frames."""
+        return self.effects.active or self.fades.active or bool(self._deferred)
+
+    def note_command(self, keys: list[str]) -> int:
+        """Record that a new command owns these fixtures.
+
+        A look fade that was waiting to start an effect will not take a fixture
+        whose epoch has moved on.
+        """
+        self._epoch += 1
+        epoch = self._epoch
+        for key in keys:
+            self._command_epoch[key] = epoch
+        self._drop_stale_deferred()
+        return epoch
+
+    def _drop_stale_deferred(self) -> None:
+        self._deferred = [
+            item
+            for item in self._deferred
+            if any(epoch == item.epoch for epoch in self._command_epoch.values())
+        ]
+
+    def defer_effects(
+        self,
+        epoch: int,
+        delay: float,
+        effects: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Start ``effects`` after ``delay`` seconds, for fixtures still at ``epoch``."""
+        if not effects or delay < 0:
+            return
+        self._deferred.append(
+            _DeferredEffects(
+                epoch=epoch,
+                deadline=self.effect_clock() + delay,
+                effects=list(effects),
+            )
+        )
+        self.ensure_effect_loop()
+
+    def deferred_effect(self, owner: str) -> dict[str, Any] | None:
+        """Effect a light is fading into and has not started yet."""
+        for item in self._deferred:
+            for item_owner, saved in item.effects:
+                if item_owner == owner:
+                    return saved
+        return None
+
+    def cancel_fades(self, keys: list[str]) -> None:
+        """Stop fades for the fixtures a new command is taking."""
+        self.fades.cancel(keys)
+
+    def _fixture_channel_bytes(self, fixture: Fixture) -> bytes:
+        """Bytes currently in the buffer for one fixture."""
+        if fixture.dmx_start is None:
+            return bytes(CHANNELS_PER_FIXTURE)
+        buffer = self._buffers.get(fixture.host)
+        if buffer is None:
+            return bytes(CHANNELS_PER_FIXTURE)
+        start = fixture.dmx_start
+        return bytes(buffer[start : start + CHANNELS_PER_FIXTURE])
+
+    def start_fade(self, key: str, target: bytes, duration: float) -> None:
+        """Fade one fixture toward ``target`` through the frame loop.
+
+        A zero duration, or a target that is already showing, writes at once.
+        An unavailable fixture is left alone so its saved bytes stay put.
+        """
+        fixture = self.get_fixture(key)
+        if (
+            fixture is None
+            or fixture.dmx_start is None
+            or fixture.host not in self.hosts
+            or not self.is_available(fixture)
+        ):
+            self.fades.cancel([key])
+            return
+        current = self._fixture_channel_bytes(fixture)
+        if not self.fades.start(key, current, bytes(target), self.effect_clock(), duration):
+            self.fades.cancel([key])
+            self.write_channels(fixture.host, fixture.dmx_start, bytes(target))
+            return
+        self.ensure_effect_loop()
+
+    def render_fades(self, now: float) -> None:
+        """Write one fade step. Effect-owned fixtures are not overwritten."""
+        dirty: set[str] = set()
+        for key, payload in self.fades.frames(now).items():
+            if key in self.effects.owners:
+                self.fades.cancel([key])
+                continue
+            fixture = self.get_fixture(key)
+            if fixture is None or fixture.dmx_start is None or not self.is_available(fixture):
+                continue
+            if self.write_channels(fixture.host, fixture.dmx_start, payload, schedule=False):
+                dirty.add(fixture.host)
+        for host in dirty:
+            self.pump.mark_dirty(host)
 
     def render_effects(self, now: float) -> None:
         """Write one effect frame into the buffers and schedule a send."""
@@ -329,18 +481,277 @@ class ColorKineticsHub:
         """Drop a fixture out of any running effect. Latest manual command wins."""
         self.effects.release_fixture(key)
 
+    def _light_for_owner(self, owner: str) -> Any:
+        """All-fixtures or group light that owns ``owner``, if it still exists."""
+        for light in self.supply_lights.values():
+            if getattr(light, "_owner_id", None) == owner:
+                return light
+        for light in self.group_lights.values():
+            if getattr(light, "_owner_id", None) == owner:
+                return light
+        return None
+
+    def _start_deferred(self, now: float) -> None:
+        """Start effects whose fade deadline has passed."""
+        waiting: list[_DeferredEffects] = []
+        due: list[_DeferredEffects] = []
+        for item in self._deferred:
+            if now >= item.deadline:
+                due.append(item)
+            else:
+                waiting.append(item)
+        self._deferred = waiting
+        for deferred in due:
+            allowed = {
+                key
+                for key, epoch in self._command_epoch.items()
+                if epoch == deferred.epoch
+            }
+            for owner, saved in deferred.effects:
+                light = self._light_for_owner(owner)
+                if light is None:
+                    continue
+                light.apply_effect_look(saved, only_keys=allowed)
+
+    def render_frame(self, now: float) -> None:
+        """One animation step: finish due look effects, then fades, then effects."""
+        self._start_deferred(now)
+        self.render_fades(now)
+        self.render_effects(now)
+
     async def _effect_loop(self) -> None:
-        """Render animated effects at the frame cap. Idle until one starts."""
+        """Render fades and effects at the frame cap. Idle until one starts."""
         try:
             while True:
-                if self.effects.active:
-                    self.render_effects(self.effect_clock())
-                    await asyncio.sleep(1 / MAX_FPS)
+                if self._animating():
+                    self.render_frame(self.effect_clock())
+                    await self._sleep(self._frame_delay())
                 else:
                     await self._effect_ready.wait()
                     self._effect_ready.clear()
         except asyncio.CancelledError:
             raise
+
+    def look_names(self) -> list[str]:
+        """Saved look names, sorted without regard to case."""
+        return sorted(self._looks, key=str.casefold)
+
+    def add_look_listener(self, listener: Listener) -> Any:
+        """Subscribe to look list changes. Returns an unsubscribe callback."""
+        self._look_listeners.append(listener)
+
+        def _remove() -> None:
+            if listener in self._look_listeners:
+                self._look_listeners.remove(listener)
+
+        return _remove
+
+    def notify_looks(self) -> None:
+        """Tell look selectors that the saved names or the selection changed."""
+        for listener in list(self._look_listeners):
+            listener()
+
+    def capture_look(self) -> dict[str, Any]:
+        """Per-fixture color and the effect running on each group light.
+
+        Fixtures are keyed by serial. Effect owners are the All fixtures id
+        and the group id, so a rename does not change the look.
+        """
+        fixtures: dict[str, Any] = {}
+        for key, light in self.fixture_lights.items():
+            rgb = tuple(int(channel) for channel in (light._attr_rgb_color or (255, 255, 255)))
+            brightness = 255 if light._attr_brightness is None else int(light._attr_brightness)
+            is_on = bool(light.is_on)
+            owner = self.effects.owners.get(str(key))
+            run = self.effects.runs.get(owner) if owner else None
+            if run is not None and str(key) in run.order:
+                is_on = True
+                brightness = int(run.brightness)
+                rgb = tuple(int(channel) for channel in run.rgb)
+            fixtures[str(key)] = {
+                "is_on": is_on,
+                "brightness": brightness,
+                "rgb": [rgb[0], rgb[1], rgb[2]],
+            }
+        lights: dict[str, Any] = {}
+        for light in (*self.supply_lights.values(), *self.group_lights.values()):
+            run = self.effects.runs.get(light._owner_id)
+            pending = self.deferred_effect(light._owner_id)
+            if run is not None and run.order:
+                effect = run.effect
+                rgb = tuple(int(channel) for channel in run.rgb)
+                brightness = int(run.brightness)
+                is_on = True
+            elif pending is not None and pending.get("effect") not in (None, EFFECT_SOLID):
+                effect = str(pending["effect"])
+                rgb = tuple(int(channel) for channel in (pending.get("rgb") or (255, 255, 255)))
+                brightness = int(pending.get("brightness") or 255)
+                is_on = True
+            else:
+                effect = EFFECT_SOLID
+                rgb = tuple(
+                    int(channel) for channel in (light._attr_rgb_color or (255, 255, 255))
+                )
+                brightness = (
+                    255 if light._attr_brightness is None else int(light._attr_brightness)
+                )
+                is_on = bool(light.is_on)
+            speed = self.effect_speed(light._owner_id)
+            if pending is not None and pending.get("speed") is not None:
+                try:
+                    speed = float(pending["speed"])
+                except (TypeError, ValueError):
+                    speed = self.effect_speed(light._owner_id)
+            lights[str(light._owner_id)] = {
+                "effect": effect,
+                "speed": speed,
+                "rgb": [rgb[0], rgb[1], rgb[2]],
+                "brightness": brightness,
+                "is_on": is_on,
+            }
+        return {"fixtures": fixtures, "lights": lights}
+
+    def _require_look_name(self, name: str) -> str:
+        clean = normalize_look_name(name)
+        if not clean:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="look_name",
+            )
+        return clean
+
+    async def async_save_look(self, name: str) -> None:
+        """Store the current fixtures and effects under ``name``.
+
+        A name that matches an existing look in any case is rejected.
+        """
+        clean = self._require_look_name(name)
+        if find_look_name(self._looks, clean) is not None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="duplicate_look",
+                translation_placeholders={"name": clean},
+            )
+        self._looks[clean] = self.capture_look()
+        self.selected_look = clean
+        await self._save()
+        self.notify_looks()
+
+    async def async_delete_look(self, name: str) -> None:
+        """Remove a look. Matching ignores case."""
+        clean = self._require_look_name(name)
+        stored = find_look_name(self._looks, clean)
+        if stored is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unknown_look",
+                translation_placeholders={"name": clean},
+            )
+        self._looks.pop(stored, None)
+        if self.selected_look == stored:
+            self.selected_look = None
+        await self._save()
+        self.notify_looks()
+
+    def _effect_first_frames(
+        self, raw_lights: dict[str, Any], allowed: set[str]
+    ) -> dict[str, bytes]:
+        """First frame of each saved animated effect, keyed by fixture.
+
+        Recall fades an effect-owned fixture toward this, not toward a color
+        the fixture entity still had from before the effect.
+        """
+        frames: dict[str, bytes] = {}
+        for owner, saved in raw_lights.items():
+            if not isinstance(saved, dict):
+                continue
+            effect = str(saved.get("effect") or EFFECT_SOLID)
+            if effect not in EFFECT_NAMES or effect == EFFECT_SOLID:
+                continue
+            light = self._light_for_owner(str(owner))
+            if light is None:
+                continue
+            members = [member for member in light._members() if member._key in allowed]
+            rgb = tuple(int(channel) for channel in (saved.get("rgb") or (255, 255, 255)))
+            try:
+                brightness = int(saved.get("brightness") if saved.get("brightness") is not None else 255)
+            except (TypeError, ValueError):
+                brightness = 255
+            count = len(members)
+            for index, member in enumerate(members):
+                frames[member._key] = fixture_channels(
+                    effect, index, count, 0.0, rgb, brightness
+                )
+        return frames
+
+    def _apply_saved_speed(self, owner: str, speed: float) -> None:
+        self.set_effect_speed(owner, speed)
+        slider = self.speed_entities.get(owner)
+        if slider is not None:
+            slider.apply_external_speed(speed)
+
+    async def async_recall_look(self, name: str, transition: float | None = None) -> None:
+        """Restore a look. Fixtures that are not here anymore are skipped.
+
+        Fixtures that are not in the look are left as they are. With a
+        transition, solid colors fade and a saved effect starts when the fade
+        ends, but only on fixtures this recall still owns.
+        """
+        clean = self._require_look_name(name)
+        stored = find_look_name(self._looks, clean)
+        if stored is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unknown_look",
+                translation_placeholders={"name": clean},
+            )
+        look = self._looks[stored]
+        raw_fixtures = look.get("fixtures") if isinstance(look, dict) else None
+        if not isinstance(raw_fixtures, dict):
+            raw_fixtures = {}
+        present: list[tuple[Any, dict[str, Any]]] = []
+        for serial, saved in raw_fixtures.items():
+            if not isinstance(saved, dict):
+                continue
+            light = self.fixture_lights.get(str(serial))
+            if light is None:
+                continue
+            present.append((light, saved))
+        keys = [light._key for light, _saved in present]
+        epoch = self.note_command(keys)
+        duration = 0.0 if transition is None else max(0.0, float(transition))
+        raw_lights = look.get("lights") if isinstance(look, dict) else None
+        if not isinstance(raw_lights, dict):
+            raw_lights = {}
+        allowed = set(keys)
+        first_frames = self._effect_first_frames(raw_lights, allowed)
+        for light, saved in present:
+            light.apply_look(saved, duration, first_frames.get(light._key))
+        deferred: list[tuple[str, dict[str, Any]]] = []
+        for owner, saved in raw_lights.items():
+            if not isinstance(saved, dict):
+                continue
+            light = self._light_for_owner(str(owner))
+            if light is None:
+                continue
+            try:
+                speed = float(saved.get("speed", DEFAULT_EFFECT_SPEED))
+            except (TypeError, ValueError):
+                speed = float(DEFAULT_EFFECT_SPEED)
+            self._apply_saved_speed(light._owner_id, speed)
+            effect = str(saved.get("effect") or EFFECT_SOLID)
+            if effect == EFFECT_SOLID:
+                light.apply_effect_look(saved)
+                continue
+            if duration > 0:
+                deferred.append((str(owner), saved))
+                continue
+            light.apply_effect_look(saved, only_keys=allowed)
+        if deferred:
+            self.defer_effects(epoch, duration, deferred)
+        self.selected_look = stored
+        self.notify_looks()
+        self.notify_light_states()
 
     def supply_device_info(self, host: str) -> DeviceInfo:
         """Device registry record shared by the supply's entities."""
@@ -433,6 +844,8 @@ class ColorKineticsHub:
         self._clear_issues()
         self.effects.runs.clear()
         self.effects.owners.clear()
+        self.fades.clear()
+        self._deferred.clear()
         task = self._effect_task
         self._effect_task = None
         if task is not None:
@@ -809,6 +1222,17 @@ class ColorKineticsHub:
                 continue
             if payload:
                 self._saved_channels[str(key)] = payload
+        raw_looks = stored.get("looks")
+        self._looks = {}
+        if isinstance(raw_looks, dict):
+            for name, look in raw_looks.items():
+                if isinstance(name, str) and name.strip() and isinstance(look, dict):
+                    self._looks[name] = look
+        selected = stored.get("selected_look")
+        if isinstance(selected, str) and selected in self._looks:
+            self.selected_look = selected
+        else:
+            self.selected_look = None
 
     def _cache(self) -> dict[str, Any]:
         fixtures = {
@@ -824,6 +1248,8 @@ class ColorKineticsHub:
             "channels": {
                 key: payload.hex() for key, payload in self._saved_channels.items() if payload
             },
+            "looks": self._looks,
+            "selected_look": self.selected_look,
         }
 
     async def _save(self) -> None:
@@ -877,6 +1303,7 @@ class ColorKineticsHub:
             keep.add(self.button_unique_id(host))
             keep.add(self.all_fixtures_unique_id(host))
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_SPEED}")
+            keep.add(f"{ident}:{SUFFIX_LOOK}")
             keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
             keep.add(f"{ident}:{SUFFIX_RAW}")
         for group in self.light_groups():

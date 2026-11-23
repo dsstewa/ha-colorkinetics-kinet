@@ -10,6 +10,7 @@ from homeassistant.helpers.storage import Store
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.color_kinetics.const import DOMAIN
+from custom_components.color_kinetics.hub import STORAGE_VERSION
 from custom_components.color_kinetics.migrate import _migrate_supplies, async_migrate_entry
 from custom_components.color_kinetics.properties import canonical_supply_serial
 from tests.fake_kinet import SUPPLY_HOST, SUPPLY_SERIAL
@@ -213,6 +214,6 @@ async def test_v010_upgrade_keeps_the_supply_device_and_entity_ids(hass):
         for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
     )
 
-    stored = await Store(hass, 1, f"{DOMAIN}_{entry.entry_id}").async_load()
+    stored = await Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}").async_load()
     assert stored["supplies"][SUPPLY_HOST]["serial_hex"] == SUPPLY_SERIAL
     assert stored["fixtures"][FIXTURE]["serial_hex"] == FIXTURE

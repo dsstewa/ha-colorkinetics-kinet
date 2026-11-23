@@ -2,10 +2,12 @@
 
 Speed is an integer 1 (slow) through 10 (fast). One cycle lasts ``6 / speed``
 seconds. Phase is that cycle position, 0 at the start of a cycle. Hue offsets
-use the index among the fixtures that are actually being drawn. Unavailable
-fixtures are omitted by the caller and are not written.
+and holiday stripes use the index among the fixtures that are actually being
+drawn. Unavailable fixtures are omitted by the caller and are not written.
 
-Latest command wins: a fixture belongs to at most one running effect.
+Holiday effects use fixed palettes. Brightness still scales every channel.
+Warm twinkle is a deterministic sparkle, so the same phase always draws the
+same frame. Latest command wins: a fixture belongs to at most one running effect.
 """
 
 from __future__ import annotations
@@ -20,6 +22,11 @@ EFFECT_COLOR_CHASE = "Color chase"
 EFFECT_THEATER = "Theater chase"
 EFFECT_ALTERNATE = "Alternate"
 EFFECT_BREATHE = "Breathe"
+EFFECT_CHRISTMAS = "Christmas"
+EFFECT_WARM_TWINKLE = "Warm twinkle"
+EFFECT_CANDY_CANE = "Candy cane"
+EFFECT_RED_WHITE_BLUE = "Red white blue"
+EFFECT_HALLOWEEN = "Halloween"
 
 EFFECT_NAMES = (
     EFFECT_SOLID,
@@ -29,7 +36,22 @@ EFFECT_NAMES = (
     EFFECT_THEATER,
     EFFECT_ALTERNATE,
     EFFECT_BREATHE,
+    EFFECT_CHRISTMAS,
+    EFFECT_WARM_TWINKLE,
+    EFFECT_CANDY_CANE,
+    EFFECT_RED_WHITE_BLUE,
+    EFFECT_HALLOWEEN,
 )
+
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+WHITE = (255, 255, 255)
+BLUE = (0, 0, 255)
+WARM_WHITE = (255, 180, 80)
+ORANGE = (255, 80, 0)
+PURPLE = (128, 0, 255)
+WARM_TWINKLE_BASE = 22
+_TWINKLE_BUCKETS = 8
 
 DEFAULT_EFFECT_SPEED = 5
 
@@ -68,6 +90,46 @@ def _hue_rgb(hue: float) -> tuple[int, int, int]:
     return ladder[index % 6]
 
 
+def _alternating(
+    index: int,
+    phase: float,
+    first: tuple[int, int, int],
+    second: tuple[int, int, int],
+    brightness: int,
+) -> bytes:
+    """Swap two colors between even and odd fixtures each half cycle."""
+    step = int(phase * 2.0) % 2
+    color = first if index % 2 == step else second
+    return _scale(color, brightness)
+
+
+def _moving_stripe(
+    index: int,
+    count: int,
+    phase: float,
+    colors: tuple[tuple[int, int, int], ...],
+    width: int,
+    brightness: int,
+) -> bytes:
+    """Slide a repeating stripe along the drawn order."""
+    drawn = max(count, 1)
+    offset = int(phase * drawn) % drawn
+    period = max(width, 1) * len(colors)
+    band = (index - offset) % period
+    return _scale(colors[band // max(width, 1)], brightness)
+
+
+def twinkle_is_sparkle(index: int, phase: float) -> bool:
+    """True when this fixture is the bright sparkle for the current phase.
+
+    Eight buckets per cycle. A fixture sparkles when ``(index + bucket)`` is
+    a multiple of 4, so neighbors differ and the pattern walks as the phase
+    advances. The same inputs always return the same answer.
+    """
+    bucket = int(phase * _TWINKLE_BUCKETS) % _TWINKLE_BUCKETS
+    return (index + bucket) % 4 == 0
+
+
 def fixture_channels(
     effect: str,
     index: int,
@@ -101,6 +163,20 @@ def fixture_channels(
         level = 0.5 - 0.5 * math.cos(2.0 * math.pi * phase)
         scaled = round(brightness * (0.2 + 0.8 * level))
         return _scale(rgb, scaled)
+    if effect == EFFECT_CHRISTMAS:
+        return _alternating(index, phase, RED, GREEN, brightness)
+    if effect == EFFECT_WARM_TWINKLE:
+        if twinkle_is_sparkle(index, phase):
+            level = brightness
+        else:
+            level = (brightness * WARM_TWINKLE_BASE) // 100
+        return _scale(WARM_WHITE, level)
+    if effect == EFFECT_CANDY_CANE:
+        return _moving_stripe(index, count, phase, (RED, WHITE), 2, brightness)
+    if effect == EFFECT_RED_WHITE_BLUE:
+        return _moving_stripe(index, count, phase, (RED, WHITE, BLUE), 1, brightness)
+    if effect == EFFECT_HALLOWEEN:
+        return _alternating(index, phase, ORANGE, PURPLE, brightness)
     return _scale(rgb, brightness)
 
 

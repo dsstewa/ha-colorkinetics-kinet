@@ -1,0 +1,162 @@
+blueprint:
+  name: Color Kinetics sunset to bedtime
+  description: >
+    At sunset, recall a saved Color Kinetics look or turn on a light with an
+    effect. At bedtime, fade that light off. Import this blueprint if you want
+    it. The integration does not install the automation for you.
+  domain: automation
+  author: dssstewa
+  homeassistant:
+    min_version: "2026.10.0"
+  source_url: https://github.com/dsstewa/ha-colorkinetics-kinet/blob/main/blueprints/automation/color_kinetics/sunset_to_bedtime.yaml
+  input:
+    sunset_offset:
+      name: Sunset offset
+      description: >
+        How far from sunset to start. Pair it with the offset direction.
+        Zero starts at sunset.
+      default:
+        hours: 0
+        minutes: 0
+        seconds: 0
+      selector:
+        duration:
+    offset_type:
+      name: Offset direction
+      description: Before starts earlier than sunset. After starts later.
+      default: after
+      selector:
+        select:
+          options:
+            - before
+            - after
+          mode: dropdown
+    look:
+      name: Look
+      description: >
+        Saved look to recall at sunset. Leave this blank to turn the light on
+        with the effect instead.
+      default: ""
+      selector:
+        text:
+    supply:
+      name: Data Enabler
+      description: >
+        Optional. Choose the Data Enabler when more than one Color Kinetics
+        entry is loaded, so the look is recalled on that entry. Leave it
+        empty when there is only one.
+      default: []
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: color_kinetics
+          entity:
+            - domain: select
+              integration: color_kinetics
+    light:
+      name: Light
+      description: >
+        Light to turn on with the effect when no look is set. Bedtime also
+        fades this light off.
+      selector:
+        entity:
+          filter:
+            - domain: light
+              integration: color_kinetics
+    off_lights:
+      name: Lights to fade off
+      description: >
+        Faded off at bedtime. Choose All fixtures, and any group the look
+        turns on, so a recalled look goes dark instead of only the effect light.
+      selector:
+        target:
+          entity:
+            - domain: light
+              integration: color_kinetics
+    effect:
+      name: Effect
+      description: Effect used when no look is set. Solid is a steady color.
+      default: Solid
+      selector:
+        select:
+          options:
+            - Solid
+            - Color wheel
+            - Rainbow chase
+            - Color chase
+            - Theater chase
+            - Alternate
+            - Breathe
+            - Christmas
+            - Warm twinkle
+            - Candy cane
+            - Red white blue
+            - Halloween
+          mode: dropdown
+    bedtime:
+      name: Bedtime
+      description: Time to fade the light off.
+      selector:
+        time:
+    transition:
+      name: Fade off
+      description: Seconds to spend fading the light off at bedtime.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 3600
+          step: 1
+          unit_of_measurement: seconds
+          mode: slider
+
+mode: single
+
+variables:
+  sunset_look: !input look
+  sunset_effect: !input effect
+
+triggers:
+  - trigger: sun.sunset
+    id: sunset
+    options:
+      offset: !input sunset_offset
+      offset_type: !input offset_type
+  - trigger: time
+    id: bedtime
+    at: !input bedtime
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: sunset
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ sunset_look | trim | length > 0 }}"
+            then:
+              - action: color_kinetics.recall_look
+                data:
+                  name: !input look
+                  device_id: !input supply
+            else:
+              - action: light.turn_on
+                target:
+                  entity_id: !input light
+                data:
+                  effect: !input effect
+      - conditions:
+          - condition: trigger
+            id: bedtime
+        sequence:
+          - action: light.turn_off
+            target: !input off_lights
+            data:
+              transition: !input transition
+          - action: light.turn_off
+            target:
+              entity_id: !input light
+            data:
+              transition: !input transition
