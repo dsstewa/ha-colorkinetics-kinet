@@ -1,0 +1,1 @@
+"""Color Kinetics integration tests."""
