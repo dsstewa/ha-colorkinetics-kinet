@@ -1,9 +1,9 @@
 {
   "domain": "color_kinetics",
   "name": "Philips Color Kinetics",
+  "categories": ["lighting.lighting_systems"],
   "codeowners": ["@dsstewa"],
   "config_flow": true,
-  "categories": ["lighting.lighting_systems"],
   "documentation": "https://github.com/dsstewa/ha-colorkinetics-kinet",
   "integration_type": "hub",
   "iot_class": "local_push",
