@@ -23,7 +23,13 @@ from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util import color as color_util
 
 from .const import CHANNELS_PER_FIXTURE, DEFAULT_EFFECT_SPEED, DOMAIN
-from .effects import EFFECT_NAMES, EFFECT_SOLID, fixture_channels
+from .effects import (
+    EFFECT_NAMES,
+    EFFECT_SOLID,
+    fixture_channels,
+    legacy_palette,
+    resolve_effect,
+)
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub, Fixture
 from .properties import SUFFIX_ALL_FIXTURES
 
@@ -487,6 +493,7 @@ class AllFixturesLight(LightEntity):
             return
         if not keys:
             return
+        style = self._hub._effect_style(self._owner_id)
         self._hub.effects.start(
             self._owner_id,
             effect,
@@ -494,8 +501,35 @@ class AllFixturesLight(LightEntity):
             tuple(self._attr_rgb_color or (255, 255, 255)),
             255 if self._attr_brightness is None else int(self._attr_brightness),
             self._hub.effect_speed(self._owner_id),
+            style["intensity"],
+            style["palette"],
+            style["direction"],
+            self._custom_colors(),
         )
         self._hub.ensure_effect_loop()
+
+    def _custom_colors(self) -> tuple[tuple[int, int, int], ...]:
+        """Colors currently on this light and its members, for the Custom palette."""
+        primary = tuple(int(channel) for channel in (self._attr_rgb_color or (255, 255, 255)))
+        colors = [primary]
+        for member in self._members():
+            rgb = tuple(int(channel) for channel in (member._attr_rgb_color or primary))
+            if rgb not in colors:
+                colors.append(rgb)
+        return tuple(colors)
+
+    def _apply_requested_effect(self, raw: str) -> str:
+        """Resolve an old effect name and select the palette that name implies."""
+        forced = legacy_palette(raw)
+        if forced is not None:
+            self._hub.set_effect_palette(self._owner_id, forced)
+            picker = self._hub.palette_entities.get(self._owner_id)
+            if picker is not None:
+                picker.apply_external(forced)
+        effect = resolve_effect(raw)
+        if effect not in EFFECT_NAMES:
+            return EFFECT_SOLID
+        return effect
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Apply one color, brightness, or effect to every member in order."""
@@ -511,9 +545,15 @@ class AllFixturesLight(LightEntity):
         self._attr_brightness = brightness
         self._attr_is_on = True
         self._attr_color_mode = ColorMode.RGB
-        effect = kwargs.get(ATTR_EFFECT, self._attr_effect or EFFECT_SOLID)
-        if effect not in EFFECT_NAMES:
+        color_chosen = any(
+            key in kwargs for key in (ATTR_RGB_COLOR, ATTR_HS_COLOR, ATTR_XY_COLOR)
+        )
+        if ATTR_EFFECT in kwargs:
+            effect = self._apply_requested_effect(str(kwargs.get(ATTR_EFFECT) or ""))
+        elif color_chosen:
             effect = EFFECT_SOLID
+        else:
+            effect = self._apply_requested_effect(str(self._attr_effect or EFFECT_SOLID))
         self._attr_effect = effect
         members = self._members()
         epoch = self._hub.note_command([member._key for member in members])
@@ -560,13 +600,25 @@ class AllFixturesLight(LightEntity):
         """
         self._hub.effects.stop(self._owner_id)
         count = len(members)
+        style = self._hub._effect_style(self._owner_id)
         for index, member in enumerate(members):
             self._hub.release_fixture_effect(member._key)
             member._attr_is_on = True
             member._attr_brightness = brightness
             member._attr_rgb_color = rgb
             member._attr_color_mode = ColorMode.RGB
-            target = fixture_channels(effect, index, count, 0.0, rgb, brightness)
+            target = fixture_channels(
+                effect,
+                index,
+                count,
+                0.0,
+                rgb,
+                brightness,
+                style["intensity"],
+                style["palette"],
+                style["direction"],
+                self._custom_colors(),
+            )
             self._hub.cancel_fades([member._key])
             self._hub.start_fade(member._key, target, duration)
             if member.hass is not None:
@@ -580,6 +632,9 @@ class AllFixturesLight(LightEntity):
                     {
                         "effect": effect,
                         "speed": self._hub.effect_speed(self._owner_id),
+                        "intensity": style["intensity"],
+                        "palette": style["palette"],
+                        "direction": style["direction"],
                         "rgb": [int(channel) for channel in rgb],
                         "brightness": int(brightness),
                         "is_on": True,
@@ -626,9 +681,7 @@ class AllFixturesLight(LightEntity):
         self, saved: dict[str, Any], only_keys: set[str] | None = None
     ) -> None:
         """Restore this light's effect. Solid leaves the fixture colors in place."""
-        effect = str(saved.get("effect") or EFFECT_SOLID)
-        if effect not in EFFECT_NAMES:
-            effect = EFFECT_SOLID
+        effect = self._apply_requested_effect(str(saved.get("effect") or EFFECT_SOLID))
         rgb = saved.get("rgb") or (255, 255, 255)
         self._attr_rgb_color = tuple(int(channel) for channel in rgb)
         if saved.get("brightness") is not None:
@@ -638,6 +691,7 @@ class AllFixturesLight(LightEntity):
         except (TypeError, ValueError):
             speed = float(DEFAULT_EFFECT_SPEED)
         self._hub.set_effect_speed(self._owner_id, speed)
+        self._hub._apply_saved_style(self._owner_id, saved)
         self._attr_effect = effect
         if effect == EFFECT_SOLID:
             self._hub.effects.stop(self._owner_id)

@@ -51,26 +51,73 @@ Open **Configure** on the integration entry.
 - **Fixture order** is a drag-and-drop list of the discovered fixture lights (`reorder` on an entity selector). The saved value is the serial list. Renames do not change it. A fixture found later is added at the end, sorted by DMX address. A fixture that drops off a scan keeps its place in the list.
 - **Groups** adds, renames, reorders, or deletes a named group. Deleting a group removes its light. The group's id does not change when you rename it.
 
-All fixtures and each group light accept an effect:
+All fixtures and each group light accept an effect. The list below is the order in the effect dropdown. Patterns are a clean-room reading of common light-show behavior. WLED is EUPL-1.2 and none of its source is included.
 
-| Effect | What it does |
-|---|---|
-| Solid | One color. This also stops an effect on that light. |
-| Color wheel | Every fixture in the run cycles hue together. |
-| Rainbow chase | Same cycle, with a hue offset per fixture along the order. |
-| Color chase | The light's color runs along the order; the other fixtures in the run go dark. |
-| Theater chase | Every third fixture, stepping along the order. |
-| Alternate | Even and odd fixtures swap between the light's color and off. The two blend over the last 30% of each half cycle. |
-| Breathe | The light's color fades in and out together. |
-| Christmas | Red and green swap between even and odd fixtures along the order, blending over the last 30% of each half cycle. |
-| Warm twinkle | A dim warm-white base with a warm-white sparkle. The sparkle is deterministic, so the same moment in the cycle always looks the same. |
-| Candy cane | A red and white stripe, two fixtures wide, moving along the order. |
-| Red white blue | A red, white, and blue stripe moving along the order. |
-| Halloween | Orange and purple swap between even and odd fixtures, the same chase as Christmas, with the same blend. |
+| Effect | What it does | Intensity (1–10) |
+|---|---|---|
+| Solid | One color. This also stops an effect on that light. | Ignored. The light's brightness is the level. |
+| Breathe | The chosen color fades in and out together. | How far the brightness falls. 1 is a shallow dip, 10 reaches dark. 5 matches the older breathe. |
+| Fade | Holds each palette color, then blends into the next. Every fixture matches. | How long each color holds before the blend. |
+| Colorloop | Walks the palette smoothly. Every fixture shows the same color. | How much of the palette one cycle walks. 5 and above walk the whole palette. |
+| Heartbeat | Two quick pulses, then a rest. | How dark the rest is between the pulses. |
+| Sunrise | A slow warm ramp. Reverse runs it back down. | How dark the ramp starts. 10 starts from off. |
+| Gradient | A still spread of the palette along the order. | How much of the palette is spread. 10 uses the whole palette. |
+| Rainbow | Every fixture shows the same hue, and the hue turns. | Saturation. 5 and above are fully saturated. |
+| Rainbow cycle | The hue wheel spread along the order, rotating once per cycle. | How much of the wheel is spread. 5 and above use the full wheel. |
+| Wipe | Fills the order from one end. | Softness of the leading edge. 5 and below are a hard edge. |
+| Sweep | Wipes to the end and back in one cycle. | Softness of the leading edge. 5 and below are a hard edge. |
+| Theater chase | Every nth fixture, stepping along the order. | Gap. 1–3 light every 2nd, 4–7 every 3rd, 8–10 every 4th. |
+| Running lights | A sine wave of brightness traveling along the order. | Wave count. 8 and above draw two waves. |
+| Chase color | The light's color runs along the order. | Tail length. 5 and below are a single fixture. 10 leaves a six-fixture tail. |
+| Scanner | One dot bounces end to end and leaves a tail. | Tail length of the dot. |
+| Dual scanner | Two dots bounce toward and away from each other. | Tail length of both dots. |
+| Meteor | A bright head with a short tail, one pass per cycle. | Tail length, about one to four fixtures. |
+| Palette flow | The palette slides along the order. | How many times the palette repeats. 8 and above repeat twice. |
+| Ripple | A ring expands from the center. Reverse draws it back in. | Width of the ring. |
+| Twinkle | A few fixtures sparkle. The same phase always draws the same frame. | How many fixtures sparkle. Lower is sparser. |
+| Twinkle fade | Fewer fixtures than Twinkle, each one fading in and out. | How many fixtures fade. Sparser than Twinkle. |
+| Candle | A gentle per-fixture flicker that stays lit. | Depth of the flicker. |
+| Fireplace | One warm flicker across the run. | Depth of the shared flicker. |
+| Lightning | Dim, then one flash per cycle, with one fixture leading it. | How long that single flash lasts. |
+| Police | Even and odd fixtures swap two colors. Custom is red and blue. | How long each color holds before it blends. Higher holds longer. 5 is the 30% blend. |
+| Alternate | The light's color and off swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
+| Christmas | Red and green swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
+| Christmas chase | Red, green, and white slide along the order. | Stripe width. 8 and above are two fixtures wide. |
+| Halloween | Orange and purple swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
 
-Holiday effects use those colors rather than the light's color. Brightness still scales them. Speed is the same 1–10 slider.
+Effects use the selected palette where a palette makes sense. Rainbow, Rainbow cycle, Christmas, Christmas chase, Halloween, Candle, and Fireplace keep their own colors (Candle and Fireplace stay warm and can take a tint from another palette). Brightness still scales every channel.
 
-**Effect speed** is a slider on the same device, from 1 to 10. The entity id is unchanged. One cycle takes `60 * (3/60) ** ((speed - 1) / 9)` seconds: 60 s at 1, about 15.9 s at 5, and 3 s at 10. Speed 10 is as fast as speed 2 was in 0.1.2. Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Christmas, Halloween, and Alternate use that same loop to blend across each color change. Changing the slider while an effect is running keeps the current point in the cycle. Brightness scales the effect. An effect does not write fixtures that are unavailable.
+Names from 0.1.x still start an effect, and the light stores the new name: Static is Solid, Color wheel is Rainbow, Rainbow chase is Rainbow cycle, Color chase is Chase color, Warm twinkle is Twinkle (and selects Warm white), Candy cane is Christmas chase, Red white blue is Palette flow (and selects July 4th).
+
+**Effect speed** is a slider on the same device, from 1 to 10. The entity id is unchanged. One cycle takes `60 * (3/60) ** ((speed - 1) / 9)` seconds: 60 s at 1, about 15.9 s at 5, and 3 s at 10. Speed 10 is as fast as speed 2 was in 0.1.2. Effects are drawn by the existing frame loop, at most 40 times a second, and the loop sleeps when nothing is animating. The keepalive still applies. Christmas, Halloween, and Alternate use that same loop to blend across each color change. Changing speed, intensity, palette, or direction while an effect is running keeps the current point in the cycle. Turning the light off, or choosing a color without an effect, stops the effect. An effect does not write fixtures that are unavailable, and it does not clear a fixture that has never been set.
+
+**Effect intensity**, **Effect palette**, and **Effect direction** sit on the Data Enabler with Effect speed, in the configuration section of the device. Each named group has the same four controls. Intensity is 1–10 and defaults to 5. Palette defaults to Custom, which uses the light's current color and, when only one color is set, a second color so a chase still has contrast. The other palettes are Christmas, Halloween, Rainbow, Warm white, Ice, Fire, Ocean, Forest, Sunset, Party, and July 4th. Direction is Forward or Reverse along the fixture order. The four controls restore after a restart, and a saved look stores them.
+
+A sample Lovelace card for the Data Enabler. Entity ids follow the device name, so replace the host slug if yours differs:
+
+```yaml
+type: grid
+columns: 2
+square: false
+cards:
+  - type: tile
+    entity: light.data_enabler_pro_172_16_10_41_all_fixtures
+    name: All fixtures
+    features:
+      - type: light-brightness
+  - type: tile
+    entity: number.data_enabler_pro_172_16_10_41_effect_speed
+    name: Effect speed
+  - type: tile
+    entity: number.data_enabler_pro_172_16_10_41_effect_intensity
+    name: Effect intensity
+  - type: tile
+    entity: select.data_enabler_pro_172_16_10_41_effect_palette
+    name: Effect palette
+  - type: tile
+    entity: select.data_enabler_pro_172_16_10_41_effect_direction
+    name: Effect direction
+```
 
 A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
 
@@ -84,7 +131,7 @@ Services, on the `color_kinetics` domain:
 
 | Service | What it does |
 |---|---|
-| `save_look` | Save the current per-fixture color and brightness, plus the effect and speed on All fixtures and each group. `name` is required. |
+| `save_look` | Save the current per-fixture color and brightness, plus the effect, speed, intensity, palette, and direction on All fixtures and each group. `name` is required. |
 | `recall_look` | Restore that look. `transition` is optional, in seconds. |
 | `delete_look` | Delete a look. |
 

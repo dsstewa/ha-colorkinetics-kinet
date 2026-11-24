@@ -27,6 +27,9 @@ from .const import (
     CHANNELS_PER_FIXTURE,
     CONF_FIXTURE_ORDER,
     CONF_GROUPS,
+    DEFAULT_EFFECT_DIRECTION,
+    DEFAULT_EFFECT_INTENSITY,
+    DEFAULT_EFFECT_PALETTE,
     DEFAULT_EFFECT_SPEED,
     DOMAIN,
     KEEPALIVE_SECONDS,
@@ -40,7 +43,17 @@ from .entry_data import (
     supplies_of,
 )
 from .manual import ManualFixture, ManualFixtureError, parse_manual_fixtures
-from .effects import EFFECT_NAMES, EFFECT_SOLID, EffectEngine, fixture_channels
+from .effects import (
+    EFFECT_NAMES,
+    EFFECT_SOLID,
+    EffectEngine,
+    clip_intensity,
+    fixture_channels,
+    legacy_palette,
+    normalize_direction,
+    normalize_palette,
+    resolve_effect,
+)
 from .fade import FadeBook
 from .looks import find_look_name, normalize_look_name
 from .order import effective_order
@@ -49,6 +62,9 @@ from .properties import (
     GEN4_FIXTURE_PROPS,
     SUFFIX_ALL_FIXTURES,
     SUFFIX_DMX,
+    SUFFIX_EFFECT_DIRECTION,
+    SUFFIX_EFFECT_INTENSITY,
+    SUFFIX_EFFECT_PALETTE,
     SUFFIX_EFFECT_SPEED,
     SUFFIX_LOOK,
     SUFFIX_POWER_TIME,
@@ -209,6 +225,9 @@ class ColorKineticsHub:
         self._effect_task: asyncio.Task[None] | None = None
         self._effect_ready = asyncio.Event()
         self._speeds: dict[str, float] = {}
+        self._intensities: dict[str, float] = {}
+        self._palettes: dict[str, str] = {}
+        self._directions: dict[str, str] = {}
         self._looks: dict[str, dict[str, Any]] = {}
         self.selected_look: str | None = None
         self._look_listeners: list[Listener] = []
@@ -219,6 +238,9 @@ class ColorKineticsHub:
         self.supply_lights: dict[str, Any] = {}
         self.group_lights: dict[str, Any] = {}
         self.speed_entities: dict[str, Any] = {}
+        self.intensity_entities: dict[str, Any] = {}
+        self.palette_entities: dict[str, Any] = {}
+        self.direction_entities: dict[str, Any] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
         self._stopped = False
@@ -337,6 +359,50 @@ class ColorKineticsHub:
         run = self.effects.runs.get(owner)
         if run is not None:
             run.speed = float(speed)
+
+    def effect_intensity(self, owner: str) -> float:
+        """Intensity slider for an effect owner. Missing sliders use 5."""
+        return float(self._intensities.get(owner, DEFAULT_EFFECT_INTENSITY))
+
+    def set_effect_intensity(self, owner: str, intensity: float) -> None:
+        """Update intensity. The cycle position stays where it is."""
+        level = float(clip_intensity(intensity))
+        self._intensities[owner] = level
+        run = self.effects.runs.get(owner)
+        if run is not None:
+            run.intensity = level
+
+    def effect_palette(self, owner: str) -> str:
+        """Palette selected for an effect owner."""
+        return normalize_palette(self._palettes.get(owner, DEFAULT_EFFECT_PALETTE))
+
+    def set_effect_palette(self, owner: str, palette: str) -> None:
+        """Update the palette. The cycle position stays where it is."""
+        name = normalize_palette(palette)
+        self._palettes[owner] = name
+        run = self.effects.runs.get(owner)
+        if run is not None:
+            run.palette = name
+
+    def effect_direction(self, owner: str) -> str:
+        """Forward or Reverse for an effect owner."""
+        return normalize_direction(self._directions.get(owner, DEFAULT_EFFECT_DIRECTION))
+
+    def set_effect_direction(self, owner: str, direction: str) -> None:
+        """Update direction along the fixture order. Phase stays put."""
+        name = normalize_direction(direction)
+        self._directions[owner] = name
+        run = self.effects.runs.get(owner)
+        if run is not None:
+            run.direction = name
+
+    def _effect_style(self, owner: str) -> dict[str, Any]:
+        """Intensity, palette, and direction currently selected for ``owner``."""
+        return {
+            "intensity": self.effect_intensity(owner),
+            "palette": self.effect_palette(owner),
+            "direction": self.effect_direction(owner),
+        }
 
     def effect_clock(self) -> float:
         """Monotonic time base for effect frames and fades."""
@@ -602,9 +668,20 @@ class ColorKineticsHub:
                     speed = float(pending["speed"])
                 except (TypeError, ValueError):
                     speed = self.effect_speed(light._owner_id)
+            style = self._effect_style(light._owner_id)
+            if pending is not None:
+                if pending.get("intensity") is not None:
+                    style["intensity"] = clip_intensity(pending["intensity"])
+                if pending.get("palette"):
+                    style["palette"] = normalize_palette(str(pending["palette"]))
+                if pending.get("direction"):
+                    style["direction"] = normalize_direction(str(pending["direction"]))
             lights[str(light._owner_id)] = {
                 "effect": effect,
                 "speed": speed,
+                "intensity": style["intensity"],
+                "palette": style["palette"],
+                "direction": style["direction"],
                 "rgb": [rgb[0], rgb[1], rgb[2]],
                 "brightness": brightness,
                 "is_on": is_on,
@@ -665,7 +742,8 @@ class ColorKineticsHub:
         for owner, saved in raw_lights.items():
             if not isinstance(saved, dict):
                 continue
-            effect = str(saved.get("effect") or EFFECT_SOLID)
+            raw_effect = str(saved.get("effect") or EFFECT_SOLID)
+            effect = resolve_effect(raw_effect)
             if effect not in EFFECT_NAMES or effect == EFFECT_SOLID:
                 continue
             light = self._light_for_owner(str(owner))
@@ -677,10 +755,21 @@ class ColorKineticsHub:
                 brightness = int(saved.get("brightness") if saved.get("brightness") is not None else 255)
             except (TypeError, ValueError):
                 brightness = 255
+            intensity = saved.get("intensity", DEFAULT_EFFECT_INTENSITY)
+            palette = legacy_palette(raw_effect) or saved.get("palette") or DEFAULT_EFFECT_PALETTE
+            direction = saved.get("direction", DEFAULT_EFFECT_DIRECTION)
             count = len(members)
             for index, member in enumerate(members):
                 frames[member._key] = fixture_channels(
-                    effect, index, count, 0.0, rgb, brightness
+                    effect,
+                    index,
+                    count,
+                    0.0,
+                    rgb,
+                    brightness,
+                    intensity,
+                    str(palette),
+                    str(direction),
                 )
         return frames
 
@@ -689,6 +778,31 @@ class ColorKineticsHub:
         slider = self.speed_entities.get(owner)
         if slider is not None:
             slider.apply_external_speed(speed)
+
+    def _apply_saved_style(self, owner: str, saved: dict[str, Any]) -> None:
+        """Restore intensity, palette, and direction. Missing keys keep the current values."""
+        raw_effect = str(saved.get("effect") or "")
+        forced = legacy_palette(raw_effect)
+        if saved.get("intensity") is not None:
+            try:
+                level = float(saved["intensity"])
+            except (TypeError, ValueError):
+                level = float(DEFAULT_EFFECT_INTENSITY)
+            self.set_effect_intensity(owner, level)
+            slider = self.intensity_entities.get(owner)
+            if slider is not None:
+                slider.apply_external_speed(self.effect_intensity(owner))
+        palette = forced if forced is not None else saved.get("palette")
+        if palette:
+            self.set_effect_palette(owner, str(palette))
+            picker = self.palette_entities.get(owner)
+            if picker is not None:
+                picker.apply_external(self.effect_palette(owner))
+        if saved.get("direction"):
+            self.set_effect_direction(owner, str(saved["direction"]))
+            picker = self.direction_entities.get(owner)
+            if picker is not None:
+                picker.apply_external(self.effect_direction(owner))
 
     async def async_recall_look(self, name: str, transition: float | None = None) -> None:
         """Restore a look. Fixtures that are not here anymore are skipped.
@@ -739,7 +853,8 @@ class ColorKineticsHub:
             except (TypeError, ValueError):
                 speed = float(DEFAULT_EFFECT_SPEED)
             self._apply_saved_speed(light._owner_id, speed)
-            effect = str(saved.get("effect") or EFFECT_SOLID)
+            self._apply_saved_style(light._owner_id, saved)
+            effect = resolve_effect(str(saved.get("effect") or EFFECT_SOLID))
             if effect == EFFECT_SOLID:
                 light.apply_effect_look(saved)
                 continue
@@ -1303,12 +1418,18 @@ class ColorKineticsHub:
             keep.add(self.button_unique_id(host))
             keep.add(self.all_fixtures_unique_id(host))
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_SPEED}")
+            keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_INTENSITY}")
+            keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_PALETTE}")
+            keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_DIRECTION}")
             keep.add(f"{ident}:{SUFFIX_LOOK}")
             keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
             keep.add(f"{ident}:{SUFFIX_RAW}")
         for group in self.light_groups():
             keep.add(self.group_owner(group["id"]))
             keep.add(f"{self.group_owner(group['id'])}:{SUFFIX_EFFECT_SPEED}")
+            keep.add(f"{self.group_owner(group['id'])}:{SUFFIX_EFFECT_INTENSITY}")
+            keep.add(f"{self.group_owner(group['id'])}:{SUFFIX_EFFECT_PALETTE}")
+            keep.add(f"{self.group_owner(group['id'])}:{SUFFIX_EFFECT_DIRECTION}")
         for fixture in self._fixtures.values():
             if not fixture.serial_hex or fixture.source == "manual":
                 continue
