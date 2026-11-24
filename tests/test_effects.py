@@ -10,6 +10,8 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from custom_components.color_kinetics.const import CONF_FIXTURE_ORDER, CONF_GROUPS, DOMAIN
 from custom_components.color_kinetics.effects import (
     EFFECT_ALTERNATE,
+    EFFECT_CHRISTMAS,
+    EFFECT_HALLOWEEN,
     EFFECT_SOLID,
     EFFECT_BREATHE,
     EFFECT_COLOR_CHASE,
@@ -45,11 +47,64 @@ def test_order_appends_new_fixtures_and_keeps_missing_slots():
     assert reordered[-1] == "88002CD9"
 
 
-def test_effect_frames_are_deterministic():
-    assert cycle_seconds(5) == pytest.approx(1.2)
-    assert cycle_seconds(1) == pytest.approx(6.0)
+def test_cycle_time_is_a_log_scale_from_60s_to_3s():
+    """Speed 1 is a minute, speed 10 is 3 s, and the steps keep a constant ratio."""
+    assert cycle_seconds(1) == pytest.approx(60.0)
+    assert cycle_seconds(10) == pytest.approx(3.0)
+    assert cycle_seconds(0) == pytest.approx(60.0)
+    assert cycle_seconds(11) == pytest.approx(3.0)
+    published = {
+        2: 43.0,
+        3: 30.9,
+        4: 22.1,
+        5: 15.9,
+        6: 11.4,
+        7: 8.2,
+        8: 5.85,
+        9: 4.2,
+    }
+    for speed, seconds in published.items():
+        assert cycle_seconds(speed) == pytest.approx(seconds, abs=0.15)
+    assert cycle_seconds(5) == pytest.approx(60.0 * (3.0 / 60.0) ** (4.0 / 9.0))
     assert cycle_phase(0.0, 5) == 0.0
-    assert cycle_phase(0.6, 5) == pytest.approx(0.5)
+    assert cycle_phase(cycle_seconds(5) / 2, 5) == pytest.approx(0.5)
+    assert cycle_phase(30.0, 1) == pytest.approx(0.5)
+    assert cycle_phase(1.5, 10) == pytest.approx(0.5)
+
+
+def test_alternating_effects_crossfade_at_the_half_cycle():
+    """The midpoint of the last 30% of a half cycle is halfway between the colors."""
+    midpoint = 0.425
+    assert fixture_channels(EFFECT_CHRISTMAS, 0, 2, midpoint, (1, 2, 3), 255) == b"\x80\x80\x00"
+    assert fixture_channels(EFFECT_CHRISTMAS, 1, 2, midpoint, (1, 2, 3), 255) == b"\x80\x80\x00"
+    assert fixture_channels(EFFECT_HALLOWEEN, 0, 2, midpoint, (9, 9, 9), 255) == b"\xc0\x28\x80"
+    assert fixture_channels(EFFECT_ALTERNATE, 0, 2, midpoint, (255, 0, 0), 255) == b"\x80\x00\x00"
+    assert fixture_channels(EFFECT_ALTERNATE, 1, 2, midpoint, (255, 0, 0), 255) == b"\x80\x00\x00"
+    assert fixture_channels(EFFECT_CHRISTMAS, 0, 2, 0.35, (1, 2, 3), 255) == b"\xff\x00\x00"
+    assert fixture_channels(EFFECT_CHRISTMAS, 0, 2, 0.5, (1, 2, 3), 255) == b"\x00\xff\x00"
+
+
+def test_speed_change_keeps_the_phase():
+    """A new speed continues from the phase already on the fixtures."""
+    engine = EffectEngine()
+    engine.start("all", EFFECT_COLOR_WHEEL, ["A"], (255, 0, 0), 255, 1)
+
+    def locate(_key):
+        return "host", 0
+
+    before = engine.frames(12.0, locate, lambda _key: True)
+    engine.runs["all"].speed = 10
+    after = engine.frames(12.0, locate, lambda _key: True)
+    assert after == before
+    phase = (12.0 / cycle_seconds(1) + 0.5) % 1.0
+    later = engine.frames(12.0 + cycle_seconds(10) / 2, locate, lambda _key: True)
+    assert later != before
+    assert later["host"][0][1] == fixture_channels(
+        EFFECT_COLOR_WHEEL, 0, 1, phase, (255, 0, 0), 255
+    )
+
+
+def test_effect_frames_are_deterministic():
     assert fixture_channels(EFFECT_COLOR_WHEEL, 0, 4, 0.0, (0, 0, 255), 255) == b"\xff\x00\x00"
     assert fixture_channels(EFFECT_COLOR_WHEEL, 3, 4, 0.0, (0, 0, 255), 255) == b"\xff\x00\x00"
     assert fixture_channels(EFFECT_RAINBOW, 0, 2, 0.0, (0, 0, 0), 255) == b"\xff\x00\x00"

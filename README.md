@@ -60,17 +60,17 @@ All fixtures and each group light accept an effect:
 | Rainbow chase | Same cycle, with a hue offset per fixture along the order. |
 | Color chase | The light's color runs along the order; the other fixtures in the run go dark. |
 | Theater chase | Every third fixture, stepping along the order. |
-| Alternate | Even and odd fixtures swap. |
+| Alternate | Even and odd fixtures swap between the light's color and off. The two blend over the last 30% of each half cycle. |
 | Breathe | The light's color fades in and out together. |
-| Christmas | Red and green swap between even and odd fixtures along the order. |
+| Christmas | Red and green swap between even and odd fixtures along the order, blending over the last 30% of each half cycle. |
 | Warm twinkle | A dim warm-white base with a warm-white sparkle. The sparkle is deterministic, so the same moment in the cycle always looks the same. |
 | Candy cane | A red and white stripe, two fixtures wide, moving along the order. |
 | Red white blue | A red, white, and blue stripe moving along the order. |
-| Halloween | Orange and purple swap between even and odd fixtures, the same chase as Christmas. |
+| Halloween | Orange and purple swap between even and odd fixtures, the same chase as Christmas, with the same blend. |
 
 Holiday effects use those colors rather than the light's color. Brightness still scales them. Speed is the same 1–10 slider.
 
-**Effect speed** is a slider on the same device, from 1 to 10. One cycle takes `6 / speed` seconds (6 s at 1, 0.6 s at 10). Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Brightness scales the effect. An effect does not write fixtures that are unavailable.
+**Effect speed** is a slider on the same device, from 1 to 10. The entity id is unchanged. One cycle takes `60 * (3/60) ** ((speed - 1) / 9)` seconds: 60 s at 1, about 15.9 s at 5, and 3 s at 10. Speed 10 is as fast as speed 2 was in 0.1.2. Effects are drawn by the existing frame loop, at most 40 times a second, and the keepalive still applies when nothing is animating. Christmas, Halloween, and Alternate use that same loop to blend across each color change. Changing the slider while an effect is running keeps the current point in the cycle. Brightness scales the effect. An effect does not write fixtures that are unavailable.
 
 A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
 
@@ -89,6 +89,8 @@ Services, on the `color_kinetics` domain:
 | `delete_look` | Delete a look. |
 
 Names match without regard to case, and a duplicate is rejected. The look is keyed by fixture serial and by group id, so renaming a fixture or a group does not break it. A serial that is no longer present is skipped. Fixtures that are not in the look are left as they are. Looks live in the same `.storage/color_kinetics_{entry_id}` file as the fixture cache. A cache written by 0.1.1 is migrated to storage version 2, which adds the look map. Deleting the config entry still removes that file.
+
+A saved look keeps the speed number, 1 through 10. That number is not rewritten when the timing changes. In 0.1.3 the same number is a slower cycle than it was in 0.1.2: speed 1 takes 60 seconds and speed 10 takes 3 seconds. A look saved at speed 5 is still speed 5.
 
 With more than one Color Kinetics entry loaded, pass `device_id` for the Data Enabler. A fixture device on that supply selects the same entry.
 

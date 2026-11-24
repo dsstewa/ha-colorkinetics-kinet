@@ -22,6 +22,7 @@ from custom_components.color_kinetics.effects import (
     EFFECT_RED_WHITE_BLUE,
     EFFECT_WARM_TWINKLE,
     EffectEngine,
+    cycle_seconds,
     fixture_channels,
     twinkle_is_sparkle,
 )
@@ -84,14 +85,14 @@ def test_holiday_effects_follow_order_phase_and_speed():
     order = ["A", "B", "C", "D"]
     engine = EffectEngine()
     engine.start("group", EFFECT_CHRISTMAS, order, (0, 0, 0), 255, 1)
-    slow = engine.frames(0.3, _dmx(order), lambda _key: True)
+    half = engine.frames(cycle_seconds(1) / 2, _dmx(order), lambda _key: True)
     engine.runs["group"].speed = 10
-    fast = engine.frames(0.3, _dmx(order), lambda _key: True)
-    assert slow != fast
-    engine.runs["group"].speed = 1
-    half = engine.frames(3.0, _dmx(order), lambda _key: True)
-    engine.runs["group"].speed = 10
-    assert engine.frames(0.3, _dmx(order), lambda _key: True) == half
+    assert engine.frames(cycle_seconds(1) / 2, _dmx(order), lambda _key: True) == half
+    assert half["host"][0][1] == b"\x00\xff\x00"
+    moved = engine.frames(
+        cycle_seconds(1) / 2 + cycle_seconds(10) / 2, _dmx(order), lambda _key: True
+    )
+    assert moved["host"][0][1] == b"\xff\x00\x00"
 
     reversed_order = list(reversed(order))
     engine.start("group", EFFECT_CHRISTMAS, reversed_order, (0, 0, 0), 255, 1)
@@ -768,7 +769,7 @@ async def test_new_effect_transition_replaces_the_running_effect(hass, monkeypat
         {"entity_id": group, "effect": EFFECT_RAINBOW, "brightness": 255},
         blocking=True,
     )
-    hub.render_effects(0.6)
+    hub.render_effects(cycle_seconds(5) / 2)
     rainbow = fixture_channels(EFFECT_RAINBOW, 0, count, 0.5, white, 255)
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == rainbow
     assert rainbow != b"\xff\x00\x00"

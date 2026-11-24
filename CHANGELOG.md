@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Effect speed is still the 1–10 slider with the same entity id. One cycle is now on a log scale from 60 s at 1 to 3 s at 10 (`60 * (3/60) ** ((speed - 1) / 9)`). Speed 10 is one cycle every 3 s, which is what speed 2 did before. A saved look keeps its speed number, so a look from 0.1.2 runs slower at the same number.
+- Christmas, Halloween, and Alternate blend from one color into the next over the last 30% of each half cycle. The existing frame loop draws the blend, still at most 40 times a second.
+- Changing the speed while an effect is running keeps the current point in the cycle and continues from there.
+
 ## 0.1.2
 
 - Holiday effects on All fixtures and every group light: Christmas, Warm twinkle, Candy cane, Red white blue, and Halloween. They follow fixture order and the 1–10 speed slider. The latest command still owns a fixture.

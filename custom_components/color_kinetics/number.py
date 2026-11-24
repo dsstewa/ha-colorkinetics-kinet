@@ -46,7 +46,11 @@ def _owners(hub: ColorKineticsHub) -> list[tuple[str, str]]:
 
 
 class EffectSpeed(RestoreNumber, NumberEntity):
-    """Cycles per the effect slider. 1 takes 6 seconds, 10 takes 0.6 seconds."""
+    """Cycles per the effect slider. 1 takes 60 seconds, 10 takes 3 seconds.
+
+    The 1–10 range, the step, and the entity id are unchanged. A saved look
+    keeps the stored number, and that number is a slower cycle than before.
+    """
 
     _attr_native_min_value = 1
     _attr_native_max_value = 10

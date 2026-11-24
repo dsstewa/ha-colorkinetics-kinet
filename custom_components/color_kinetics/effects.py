@@ -1,13 +1,23 @@
 """Effect frames for an ordered run of fixtures.
 
-Speed is an integer 1 (slow) through 10 (fast). One cycle lasts ``6 / speed``
-seconds. Phase is that cycle position, 0 at the start of a cycle. Hue offsets
-and holiday stripes use the index among the fixtures that are actually being
-drawn. Unavailable fixtures are omitted by the caller and are not written.
+Speed is an integer 1 (slow) through 10 (fast). One cycle lasts
+
+``60 * (3/60) ** ((clip(speed, 1, 10) - 1) / 9)`` seconds, so speed 1 is 60 s
+and speed 10 is 3 s. The 1–10 slider and its entity id are unchanged. A saved
+look keeps that speed number, and the same number is a slower cycle than it
+was before. Phase is the position in the cycle, 0 at the start. Changing the
+speed keeps the current phase and continues from there.
+
+Hue offsets and holiday stripes use the index among the fixtures that are
+actually being drawn. Unavailable fixtures are omitted by the caller and are
+not written.
 
 Holiday effects use fixed palettes. Brightness still scales every channel.
-Warm twinkle is a deterministic sparkle, so the same phase always draws the
-same frame. Latest command wins: a fixture belongs to at most one running effect.
+Christmas, Halloween, and Alternate each hold one of two colors for a half
+cycle, then blend into the other over the last 30% of that half. The blend is
+drawn by the existing frame loop. Warm twinkle is a deterministic sparkle, so
+the same phase always draws the same frame. Latest command wins: a fixture
+belongs to at most one running effect.
 """
 
 from __future__ import annotations
@@ -55,16 +65,27 @@ _TWINKLE_BUCKETS = 8
 
 DEFAULT_EFFECT_SPEED = 5
 
+# Two-color effects hold, then blend across the last 30% of each half cycle.
+_CROSSFADE_HOLD = 0.70
+
 
 def cycle_seconds(speed: float) -> float:
-    """Seconds for one effect cycle. Speed 1 is 6 s, speed 10 is 0.6 s."""
+    """Seconds for one effect cycle. Speed 1 is 60 s, speed 10 is 3 s.
+
+    The steps are logarithmic, so each one is the same ratio. Speed 10 matches
+    the old speed 2 (one cycle every 3 s). Values outside 1–10 are clipped.
+    """
     clipped = min(10.0, max(1.0, float(speed)))
-    return 6.0 / clipped
+    return 60.0 * (3.0 / 60.0) ** ((clipped - 1.0) / 9.0)
 
 
-def cycle_phase(now: float, speed: float) -> float:
-    """Position in the cycle, in ``[0, 1)``."""
-    return (float(now) / cycle_seconds(speed)) % 1.0
+def cycle_phase(now: float, speed: float, origin: float = 0.0) -> float:
+    """Position in the cycle, in ``[0, 1)``.
+
+    ``origin`` is the time at which this speed's phase is 0. A running effect
+    moves the origin when the speed changes so the phase does not jump.
+    """
+    return ((float(now) - float(origin)) / cycle_seconds(speed)) % 1.0
 
 
 def _scale(rgb: tuple[int, int, int], brightness: int) -> bytes:
@@ -90,6 +111,46 @@ def _hue_rgb(hue: float) -> tuple[int, int, int]:
     return ladder[index % 6]
 
 
+def _mix_rgb(
+    start: tuple[int, int, int],
+    end: tuple[int, int, int],
+    progress: float,
+) -> tuple[int, int, int]:
+    """Blend two colors. A full-scale channel is 128 at the midpoint."""
+    clamped = min(1.0, max(0.0, float(progress)))
+    step = int(round(clamped * 1000))
+    mixed: list[int] = []
+    for origin, dest in zip(start, end, strict=True):
+        value = (int(origin) * (1000 - step) + int(dest) * step + 500) // 1000
+        mixed.append(max(0, min(255, value)))
+    return mixed[0], mixed[1], mixed[2]
+
+
+def _half_cycle_color(
+    phase: float,
+    current: tuple[int, int, int],
+    upcoming: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    """Hold ``current``, then blend into ``upcoming`` over the last 30% of the half."""
+    along = (float(phase) * 2.0) % 1.0
+    if along <= _CROSSFADE_HOLD:
+        return current
+    return _mix_rgb(current, upcoming, (along - _CROSSFADE_HOLD) / (1.0 - _CROSSFADE_HOLD))
+
+
+def _pair_for_half(
+    index: int,
+    phase: float,
+    first: tuple[int, int, int],
+    second: tuple[int, int, int],
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """This half's color and the next half's color for one fixture."""
+    step = int(phase * 2.0) % 2
+    if index % 2 == step:
+        return first, second
+    return second, first
+
+
 def _alternating(
     index: int,
     phase: float,
@@ -97,10 +158,9 @@ def _alternating(
     second: tuple[int, int, int],
     brightness: int,
 ) -> bytes:
-    """Swap two colors between even and odd fixtures each half cycle."""
-    step = int(phase * 2.0) % 2
-    color = first if index % 2 == step else second
-    return _scale(color, brightness)
+    """Swap two colors between even and odd fixtures, blending across the change."""
+    current, upcoming = _pair_for_half(index, phase, first, second)
+    return _scale(_half_cycle_color(phase, current, upcoming), brightness)
 
 
 def _moving_stripe(
@@ -155,10 +215,8 @@ def fixture_channels(
             return _scale(rgb, brightness)
         return b"\x00\x00\x00"
     if effect == EFFECT_ALTERNATE:
-        step = int(phase * 2.0) % 2
-        if index % 2 == step:
-            return _scale(rgb, brightness)
-        return b"\x00\x00\x00"
+        current, upcoming = _pair_for_half(index, phase, rgb, (0, 0, 0))
+        return _scale(_half_cycle_color(phase, current, upcoming), brightness)
     if effect == EFFECT_BREATHE:
         level = 0.5 - 0.5 * math.cos(2.0 * math.pi * phase)
         scaled = round(brightness * (0.2 + 0.8 * level))
@@ -189,6 +247,22 @@ class EffectRun:
     rgb: tuple[int, int, int]
     brightness: int
     speed: float
+    phase_origin: float = 0.0
+    phase_speed: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Remember which speed the phase origin was built for."""
+        self.phase_speed = float(self.speed)
+
+    def phase_at(self, now: float) -> float:
+        """Cycle position at ``now``. A new speed continues from this phase."""
+        moment = float(now)
+        speed = float(self.speed)
+        if speed != self.phase_speed:
+            held = cycle_phase(moment, self.phase_speed, self.phase_origin)
+            self.phase_origin = moment - held * cycle_seconds(speed)
+            self.phase_speed = speed
+        return cycle_phase(moment, speed, self.phase_origin)
 
 
 @dataclass
@@ -277,7 +351,7 @@ class EffectEngine:
         grouped: dict[str, list[tuple[int, bytes]]] = {}
         for run in self.runs.values():
             drawn = [key for key in run.order if available(key)]
-            phase = cycle_phase(now, run.speed)
+            phase = run.phase_at(now)
             count = len(drawn)
             for index, key in enumerate(drawn):
                 located = dmx_of(key)
