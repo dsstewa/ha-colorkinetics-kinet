@@ -28,5 +28,8 @@ MAX_FPS: Final = 40
 KEEPALIVE_SECONDS: Final = 1.0
 
 DEFAULT_EFFECT_SPEED: Final = 5
+DEFAULT_EFFECT_INTENSITY: Final = 5
+DEFAULT_EFFECT_PALETTE: Final = "Custom"
+DEFAULT_EFFECT_DIRECTION: Final = "Forward"
 
 PLATFORMS: Final = ["light", "button", "sensor", "number", "select"]

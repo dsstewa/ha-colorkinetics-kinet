@@ -95,17 +95,79 @@
     },
     "light": {
       "all_fixtures": {
-        "name": "All fixtures"
+        "name": "All fixtures",
+        "state_attributes": {
+          "effect": {
+            "state": {
+              "solid": "Solid",
+              "breathe": "Breathe",
+              "fade": "Fade",
+              "colorloop": "Colorloop",
+              "heartbeat": "Heartbeat",
+              "sunrise": "Sunrise",
+              "gradient": "Gradient",
+              "rainbow": "Rainbow",
+              "rainbow_cycle": "Rainbow cycle",
+              "wipe": "Wipe",
+              "sweep": "Sweep",
+              "theater_chase": "Theater chase",
+              "running_lights": "Running lights",
+              "chase_color": "Chase color",
+              "scanner": "Scanner",
+              "dual_scanner": "Dual scanner",
+              "meteor": "Meteor",
+              "palette_flow": "Palette flow",
+              "ripple": "Ripple",
+              "twinkle": "Twinkle",
+              "twinkle_fade": "Twinkle fade",
+              "candle": "Candle",
+              "fireplace": "Fireplace",
+              "lightning": "Lightning",
+              "police": "Police",
+              "alternate": "Alternate",
+              "christmas": "Christmas",
+              "christmas_chase": "Christmas chase",
+              "halloween": "Halloween"
+            }
+          }
+        }
       }
     },
     "number": {
       "effect_speed": {
         "name": "Effect speed"
+      },
+      "effect_intensity": {
+        "name": "Effect intensity"
       }
     },
     "select": {
       "look": {
         "name": "Look"
+      },
+      "effect_palette": {
+        "name": "Effect palette",
+        "state": {
+          "christmas": "Christmas",
+          "halloween": "Halloween",
+          "rainbow": "Rainbow",
+          "warm_white": "Warm white",
+          "ice": "Ice",
+          "fire": "Fire",
+          "ocean": "Ocean",
+          "forest": "Forest",
+          "sunset": "Sunset",
+          "party": "Party",
+          "july_4th": "July 4th",
+          "custom": "Custom"
+        }
+      },
+      "effect_direction": {
+        "name": "Effect direction",
+        "state": {
+          "forward": "Forward",
+          "reverse": "Reverse"
+        }
       }
     },
     "sensor": {
@@ -146,7 +208,7 @@
   "services": {
     "save_look": {
       "name": "Save look",
-      "description": "Save the current fixture colors, brightness, and any running effect and speed as a named look.",
+      "description": "Save the current fixture colors, brightness, and any running effect, speed, intensity, palette, and direction as a named look.",
       "fields": {
         "name": {
           "name": "Name",

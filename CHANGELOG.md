@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0
+
+- A clean-room effect pack for eight fixtures: Solid, Breathe, Fade, Colorloop, Heartbeat, Sunrise, Gradient, Rainbow, Rainbow cycle, Wipe, Sweep, Theater chase, Running lights, Chase color, Scanner, Dual scanner, Meteor, Palette flow, Ripple, Twinkle, Twinkle fade, Candle, Fireplace, Lightning, Police, Alternate, Christmas, Christmas chase, and Halloween. WLED source is not included.
+- Effect intensity (1–10), Effect palette, and Effect direction on the Data Enabler and on each group. Speed, intensity, palette, and direction persist across a restart and are stored on a look. Changing one while an effect is running keeps the current point in the cycle.
+- Older effect names still start: Static, Color wheel, Rainbow chase, Color chase, Warm twinkle, Candy cane, and Red white blue. The light stores the new name.
+- Choosing a color without an effect, or turning the light off, stops the effect. Unavailable fixtures are still left alone.
+
 ## 0.1.3
 
 - Effect speed is still the 1–10 slider with the same entity id. One cycle is now on a log scale from 60 s at 1 to 3 s at 10 (`60 * (3/60) ** ((speed - 1) / 9)`). Speed 10 is one cycle every 3 s, which is what speed 2 did before. A saved look keeps its speed number, so a look from 0.1.2 runs slower at the same number.

@@ -192,7 +192,8 @@ async def test_christmas_follows_fixture_order_and_a_manual_color_wins(hass):
     group = _entity_id(hass, "light", f"{SUPPLY_SERIAL}:all_fixtures")
     state = hass.states.get(group)
     assert "Christmas" in state.attributes["effect_list"]
-    assert "Warm twinkle" in state.attributes["effect_list"]
+    assert "Twinkle" in state.attributes["effect_list"]
+    assert "Warm twinkle" not in state.attributes["effect_list"]
     assert state.attributes["supported_features"] & LightEntityFeature.TRANSITION
     assert state.attributes["supported_features"] & LightEntityFeature.EFFECT
     one = _entity_id(hass, "light", "880055BE")

@@ -37,6 +37,9 @@ SUFFIX_DMX = "dmx_address"
 SUFFIX_STARTUP = "startup_channels"
 SUFFIX_SCALE = "scale_factors"
 SUFFIX_EFFECT_SPEED = "effect_speed"
+SUFFIX_EFFECT_INTENSITY = "effect_intensity"
+SUFFIX_EFFECT_PALETTE = "effect_palette"
+SUFFIX_EFFECT_DIRECTION = "effect_direction"
 SUFFIX_LOOK = "look"
 
 

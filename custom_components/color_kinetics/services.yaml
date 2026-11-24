@@ -1,6 +1,6 @@
 save_look:
   name: Save look
-  description: Save the current fixture colors, brightness, and any running effect and speed as a named look.
+  description: Save the current fixture colors, brightness, and any running effect, speed, intensity, palette, and direction as a named look.
   fields:
     name:
       name: Name
