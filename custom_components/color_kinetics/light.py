@@ -6,6 +6,8 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_COLOR_MODE,
+    ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_HS_COLOR,
     ATTR_RGB_COLOR,
@@ -22,7 +24,14 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.util import color as color_util
 
-from .const import CHANNELS_PER_FIXTURE, DEFAULT_EFFECT_SPEED, DOMAIN
+from .color_temp import clamp_kelvin, kelvin_to_rgb
+from .const import (
+    CHANNELS_PER_FIXTURE,
+    DEFAULT_EFFECT_SPEED,
+    DOMAIN,
+    MAX_COLOR_TEMP_KELVIN,
+    MIN_COLOR_TEMP_KELVIN,
+)
 from .effects import (
     EFFECT_NAMES,
     EFFECT_SOLID,
@@ -42,11 +51,15 @@ def scale_rgb(rgb: tuple[int, int, int], brightness: int) -> bytes:
     return bytes((channel * level + 127) // 255 for channel in rgb)
 
 
-def transition_seconds(kwargs: dict[str, Any]) -> float:
-    """Seconds to fade, or 0 when the command should snap."""
+def transition_seconds(kwargs: dict[str, Any], default: float = 0.0) -> float:
+    """Seconds to fade.
+
+    An omitted ``transition`` uses ``default``. An explicit 0, or a value that
+    is not a number, snaps. A scene that sets ``transition`` gets that value.
+    """
+    if ATTR_TRANSITION not in kwargs:
+        return max(0.0, float(default))
     raw = kwargs.get(ATTR_TRANSITION)
-    if raw is None:
-        return 0.0
     try:
         seconds = float(raw)
     except (TypeError, ValueError):
@@ -56,13 +69,46 @@ def transition_seconds(kwargs: dict[str, Any]) -> float:
     return seconds
 
 
+def apply_color_kwargs(entity: LightEntity, kwargs: dict[str, Any]) -> bool:
+    """Apply rgb, hs, xy, or kelvin. Return true when the caller set a color.
+
+    Kelvin wins only when no rgb, hs, or xy is in the same call. The stored
+    RGB for kelvin is the blackbody color, so effects use that color.
+    """
+    if any(key in kwargs for key in (ATTR_RGB_COLOR, ATTR_HS_COLOR, ATTR_XY_COLOR)):
+        if ATTR_RGB_COLOR in kwargs:
+            entity._attr_rgb_color = tuple(int(channel) for channel in kwargs[ATTR_RGB_COLOR])
+        elif ATTR_HS_COLOR in kwargs:
+            entity._attr_rgb_color = color_util.color_hs_to_RGB(*kwargs[ATTR_HS_COLOR])
+        else:
+            entity._attr_rgb_color = color_util.color_xy_to_RGB(*kwargs[ATTR_XY_COLOR])
+        entity._attr_color_mode = ColorMode.RGB
+        return True
+    if ATTR_COLOR_TEMP_KELVIN in kwargs:
+        kelvin = clamp_kelvin(kwargs[ATTR_COLOR_TEMP_KELVIN])
+        entity._attr_color_temp_kelvin = kelvin
+        entity._attr_rgb_color = kelvin_to_rgb(kelvin)
+        entity._attr_color_mode = ColorMode.COLOR_TEMP
+        return True
+    return False
+
+
 class _ColorData(ExtraStoredData):
     """Optimistic color stored beside the entity state."""
 
-    def __init__(self, is_on: bool, brightness: int, rgb: tuple[int, int, int]) -> None:
+    def __init__(
+        self,
+        is_on: bool,
+        brightness: int,
+        rgb: tuple[int, int, int],
+        color_mode: str,
+        color_temp_kelvin: int | None,
+    ) -> None:
         self.is_on = is_on
         self.brightness = brightness
         self.rgb = rgb
+        self.color_mode = color_mode
+        self.color_temp_kelvin = color_temp_kelvin
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize for restore."""
@@ -70,6 +116,8 @@ class _ColorData(ExtraStoredData):
             "is_on": self.is_on,
             "brightness": self.brightness,
             "rgb": list(self.rgb),
+            "color_mode": self.color_mode,
+            "color_temp_kelvin": self.color_temp_kelvin,
         }
 
 
@@ -121,8 +169,10 @@ async def async_setup_entry(
 class FixtureLight(RestoreEntity, LightEntity):
     """Optimistic RGB light. The Data Enabler does not report color back."""
 
-    _attr_supported_color_modes = {ColorMode.RGB}
+    _attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.RGB}
     _attr_color_mode = ColorMode.RGB
+    _attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
+    _attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
     _attr_supported_features = LightEntityFeature.TRANSITION
     _attr_assumed_state = True
     _attr_has_entity_name = True
@@ -138,6 +188,7 @@ class FixtureLight(RestoreEntity, LightEntity):
         self._attr_is_on = False
         self._attr_brightness = 255
         self._attr_rgb_color = (255, 255, 255)
+        self._off_when_fade_ends = False
         self._attr_available = bool(fixture and hub.is_available(fixture))
         self._attr_device_info = self._device_info(fixture)
 
@@ -172,7 +223,13 @@ class FixtureLight(RestoreEntity, LightEntity):
         """Remember color even if the entity was unavailable."""
         rgb = self._attr_rgb_color or (255, 255, 255)
         brightness = 255 if self._attr_brightness is None else int(self._attr_brightness)
-        return _ColorData(bool(self._attr_is_on), brightness, tuple(rgb))
+        return _ColorData(
+            bool(self._attr_is_on),
+            brightness,
+            tuple(int(channel) for channel in rgb),
+            str(self._attr_color_mode or ColorMode.RGB),
+            self._attr_color_temp_kelvin,
+        )
 
     async def async_added_to_hass(self) -> None:
         """Restore the last color and write it into the frame buffer."""
@@ -181,22 +238,46 @@ class FixtureLight(RestoreEntity, LightEntity):
         if extra is not None:
             raw = extra.as_dict()
             self._attr_is_on = bool(raw.get("is_on"))
-            if raw.get("brightness") is not None:
-                self._attr_brightness = int(raw["brightness"])
-            if raw.get("rgb"):
-                self._attr_rgb_color = tuple(int(channel) for channel in raw["rgb"])
+            self._restore_color(raw)
         else:
             last = await self.async_get_last_state()
             if last is not None and last.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
                 self._attr_is_on = last.state == STATE_ON
-                if last.attributes.get(ATTR_BRIGHTNESS) is not None:
-                    self._attr_brightness = int(last.attributes[ATTR_BRIGHTNESS])
-                if last.attributes.get(ATTR_RGB_COLOR) is not None:
-                    self._attr_rgb_color = tuple(last.attributes[ATTR_RGB_COLOR])
-        self._attr_color_mode = ColorMode.RGB
+                self._restore_color(
+                    {
+                        "brightness": last.attributes.get(ATTR_BRIGHTNESS),
+                        "rgb": last.attributes.get(ATTR_RGB_COLOR),
+                        "color_mode": last.attributes.get(ATTR_COLOR_MODE),
+                        "color_temp_kelvin": last.attributes.get(ATTR_COLOR_TEMP_KELVIN),
+                    }
+                )
         fixture = self._fixture()
         self._attr_available = bool(fixture and self._hub.is_available(fixture))
         self._push()
+        self._hub.notify_light_states()
+
+    def _restore_color(self, raw: dict[str, Any]) -> None:
+        """Restore brightness, RGB, and the last color mode."""
+        if raw.get("brightness") is not None:
+            self._attr_brightness = int(raw["brightness"])
+        if raw.get("rgb"):
+            self._attr_rgb_color = tuple(int(channel) for channel in raw["rgb"])
+        kelvin = raw.get("color_temp_kelvin")
+        if raw.get("color_mode") == ColorMode.COLOR_TEMP and kelvin is not None:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_color_temp_kelvin = clamp_kelvin(kelvin)
+            self._attr_rgb_color = kelvin_to_rgb(self._attr_color_temp_kelvin)
+            return
+        self._attr_color_mode = ColorMode.RGB
+
+    def complete_fade(self) -> None:
+        """Mark the light off after a turn-off fade reaches zero."""
+        if not self._off_when_fade_ends:
+            return
+        self._off_when_fade_ends = False
+        self._attr_is_on = False
+        if self.hass is not None:
+            self.async_write_ha_state()
 
     def apply_fixture_update(self) -> None:
         """Availability, model, or DMX address changed after a rescan."""
@@ -236,22 +317,17 @@ class FixtureLight(RestoreEntity, LightEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Set color and brightness. State is optimistic."""
         if kwargs.get(ATTR_BRIGHTNESS) == 0:
-            await self.async_turn_off()
+            await self.async_turn_off(**kwargs)
             return
-        if ATTR_RGB_COLOR in kwargs:
-            self._attr_rgb_color = tuple(int(channel) for channel in kwargs[ATTR_RGB_COLOR])
-        elif ATTR_HS_COLOR in kwargs:
-            self._attr_rgb_color = color_util.color_hs_to_RGB(*kwargs[ATTR_HS_COLOR])
-        elif ATTR_XY_COLOR in kwargs:
-            self._attr_rgb_color = color_util.color_xy_to_RGB(*kwargs[ATTR_XY_COLOR])
+        apply_color_kwargs(self, kwargs)
         if ATTR_BRIGHTNESS in kwargs:
             self._attr_brightness = int(kwargs[ATTR_BRIGHTNESS])
         self._attr_is_on = True
-        self._attr_color_mode = ColorMode.RGB
+        self._off_when_fade_ends = False
         self._hub.note_command([self._key])
         self._hub.release_fixture_effect(self._key)
         self._hub.cancel_fades([self._key])
-        duration = transition_seconds(kwargs)
+        duration = transition_seconds(kwargs, self._hub.default_fade)
         if duration > 0:
             self._hub.start_fade(self._key, self._channels(), duration)
         else:
@@ -260,15 +336,21 @@ class FixtureLight(RestoreEntity, LightEntity):
         self._hub.notify_light_states()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the fixture's channels off. The last color is kept."""
-        self._attr_is_on = False
+        """Fade the fixture's channels to zero, then report off.
+
+        The last color is kept. An explicit ``transition`` of 0 snaps off.
+        """
         self._hub.note_command([self._key])
         self._hub.release_fixture_effect(self._key)
         self._hub.cancel_fades([self._key])
-        duration = transition_seconds(kwargs)
+        duration = transition_seconds(kwargs, self._hub.default_fade)
         if duration > 0:
-            self._hub.start_fade(self._key, bytes(_CHANNELS), duration)
+            self._off_when_fade_ends = True
+            if not self._hub.start_fade(self._key, bytes(_CHANNELS), duration):
+                self.complete_fade()
         else:
+            self._off_when_fade_ends = False
+            self._attr_is_on = False
             self._push()
         self.async_write_ha_state()
         self._hub.notify_light_states()
@@ -284,12 +366,19 @@ class FixtureLight(RestoreEntity, LightEntity):
         ``channel_target`` is the bytes to fade toward. An effect recall passes
         the effect's first frame so a stale saved color is not the target.
         """
-        rgb = saved.get("rgb") or (255, 255, 255)
-        self._attr_rgb_color = tuple(int(channel) for channel in rgb)
+        self._off_when_fade_ends = False
+        kelvin = saved.get("color_temp_kelvin")
+        if saved.get("color_mode") == ColorMode.COLOR_TEMP and kelvin is not None:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_color_temp_kelvin = clamp_kelvin(kelvin)
+            self._attr_rgb_color = kelvin_to_rgb(self._attr_color_temp_kelvin)
+        else:
+            rgb = saved.get("rgb") or (255, 255, 255)
+            self._attr_rgb_color = tuple(int(channel) for channel in rgb)
+            self._attr_color_mode = ColorMode.RGB
         if saved.get("brightness") is not None:
             self._attr_brightness = int(saved["brightness"])
         self._attr_is_on = bool(saved.get("is_on"))
-        self._attr_color_mode = ColorMode.RGB
         self._hub.release_fixture_effect(self._key)
         self._hub.cancel_fades([self._key])
         payload = self._channels() if channel_target is None else bytes(channel_target)
@@ -304,8 +393,10 @@ class FixtureLight(RestoreEntity, LightEntity):
 class AllFixturesLight(LightEntity):
     """One RGB light that paints every available discovered fixture on a supply."""
 
-    _attr_supported_color_modes = {ColorMode.RGB}
+    _attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.RGB}
     _attr_color_mode = ColorMode.RGB
+    _attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
+    _attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
     _attr_supported_features = LightEntityFeature.EFFECT | LightEntityFeature.TRANSITION
     _attr_effect_list = list(EFFECT_NAMES)
     _attr_effect = EFFECT_SOLID
@@ -371,6 +462,17 @@ class AllFixturesLight(LightEntity):
         if len(colors) == 1 and len(levels) == 1:
             self._attr_rgb_color = next(iter(colors))
             self._attr_brightness = next(iter(levels))
+        modes = {member.color_mode for member in members}
+        if len(modes) == 1:
+            self._attr_color_mode = next(iter(modes))
+        if self.color_mode == ColorMode.COLOR_TEMP:
+            kelvins = {
+                member.color_temp_kelvin
+                for member in members
+                if member.color_temp_kelvin is not None
+            }
+            if len(kelvins) == 1:
+                self._attr_color_temp_kelvin = next(iter(kelvins))
 
     def publish(self) -> None:
         """Refresh the aggregated state."""
@@ -448,7 +550,10 @@ class AllFixturesLight(LightEntity):
                 member._attr_is_on = bool(self._attr_is_on)
                 member._attr_rgb_color = rgb
                 member._attr_brightness = self._attr_brightness
-            member._attr_color_mode = ColorMode.RGB
+            member._off_when_fade_ends = False
+            member._attr_color_mode = self.color_mode or ColorMode.RGB
+            if self.color_temp_kelvin is not None:
+                member._attr_color_temp_kelvin = self.color_temp_kelvin
             if member.hass is not None:
                 member.async_write_ha_state()
 
@@ -462,19 +567,6 @@ class AllFixturesLight(LightEntity):
         for host, starts in by_host.items():
             self._hub.write_same_channels(host, starts, payload)
         self.publish()
-
-    def _parsed_color(self, kwargs: dict[str, Any]) -> tuple[tuple[int, int, int], int]:
-        rgb = tuple(int(channel) for channel in (self._attr_rgb_color or (255, 255, 255)))
-        if ATTR_RGB_COLOR in kwargs:
-            rgb = tuple(int(channel) for channel in kwargs[ATTR_RGB_COLOR])
-        elif ATTR_HS_COLOR in kwargs:
-            rgb = tuple(color_util.color_hs_to_RGB(*kwargs[ATTR_HS_COLOR]))
-        elif ATTR_XY_COLOR in kwargs:
-            rgb = tuple(color_util.color_xy_to_RGB(*kwargs[ATTR_XY_COLOR]))
-        brightness = 255 if self._attr_brightness is None else int(self._attr_brightness)
-        if ATTR_BRIGHTNESS in kwargs:
-            brightness = int(kwargs[ATTR_BRIGHTNESS])
-        return rgb, brightness
 
     def _claim(self, effect: str, only_keys: set[str] | None = None) -> None:
         """Latest command wins: these fixtures leave any other effect.
@@ -540,14 +632,10 @@ class AllFixturesLight(LightEntity):
         if kwargs.get(ATTR_BRIGHTNESS) == 0:
             await self.async_turn_off(**kwargs)
             return
-        rgb, brightness = self._parsed_color(kwargs)
-        self._attr_rgb_color = rgb
-        self._attr_brightness = brightness
+        color_chosen = apply_color_kwargs(self, kwargs)
+        if ATTR_BRIGHTNESS in kwargs:
+            self._attr_brightness = int(kwargs[ATTR_BRIGHTNESS])
         self._attr_is_on = True
-        self._attr_color_mode = ColorMode.RGB
-        color_chosen = any(
-            key in kwargs for key in (ATTR_RGB_COLOR, ATTR_HS_COLOR, ATTR_XY_COLOR)
-        )
         if ATTR_EFFECT in kwargs:
             effect = self._apply_requested_effect(str(kwargs.get(ATTR_EFFECT) or ""))
         elif color_chosen:
@@ -557,8 +645,13 @@ class AllFixturesLight(LightEntity):
         self._attr_effect = effect
         members = self._members()
         epoch = self._hub.note_command([member._key for member in members])
-        duration = transition_seconds(kwargs)
+        if effect != EFFECT_SOLID and ATTR_TRANSITION not in kwargs:
+            duration = 0.0
+        else:
+            duration = transition_seconds(kwargs, self._hub.default_fade)
         if effect != EFFECT_SOLID and duration > 0:
+            rgb = tuple(int(channel) for channel in (self._attr_rgb_color or (255, 255, 255)))
+            brightness = 255 if self._attr_brightness is None else int(self._attr_brightness)
             self._fade_in_effect(members, effect, rgb, brightness, duration, epoch)
             self.publish()
             self._hub.notify_light_states()
@@ -567,9 +660,10 @@ class AllFixturesLight(LightEntity):
         if effect == EFFECT_SOLID:
             if duration > 0:
                 self._remember_members(members)
+                now = self._hub.effect_clock()
                 for member in members:
                     self._hub.cancel_fades([member._key])
-                    self._hub.start_fade(member._key, self._channels(), duration)
+                    self._hub.start_fade(member._key, self._channels(), duration, now=now)
                 self.publish()
                 self._hub.notify_light_states()
                 return
@@ -601,12 +695,16 @@ class AllFixturesLight(LightEntity):
         self._hub.effects.stop(self._owner_id)
         count = len(members)
         style = self._hub._effect_style(self._owner_id)
+        now = self._hub.effect_clock()
         for index, member in enumerate(members):
             self._hub.release_fixture_effect(member._key)
+            member._off_when_fade_ends = False
             member._attr_is_on = True
             member._attr_brightness = brightness
             member._attr_rgb_color = rgb
-            member._attr_color_mode = ColorMode.RGB
+            member._attr_color_mode = self.color_mode or ColorMode.RGB
+            if self.color_temp_kelvin is not None:
+                member._attr_color_temp_kelvin = self.color_temp_kelvin
             target = fixture_channels(
                 effect,
                 index,
@@ -620,7 +718,7 @@ class AllFixturesLight(LightEntity):
                 self._custom_colors(),
             )
             self._hub.cancel_fades([member._key])
-            self._hub.start_fade(member._key, target, duration)
+            self._hub.start_fade(member._key, target, duration, now=now)
             if member.hass is not None:
                 member.async_write_ha_state()
         self._hub.defer_effects(
@@ -659,21 +757,25 @@ class AllFixturesLight(LightEntity):
         Fixtures another effect owns are not released and are not written.
         """
         members = self._members_we_may_turn_off()
-        self._attr_is_on = False
         self._attr_effect = EFFECT_SOLID
         self._hub.note_command([member._key for member in members])
         self._hub.effects.stop(self._owner_id)
-        duration = transition_seconds(kwargs)
+        duration = transition_seconds(kwargs, self._hub.default_fade)
         if duration > 0 and members:
+            now = self._hub.effect_clock()
             for member in members:
-                member._attr_is_on = False
+                member._off_when_fade_ends = True
                 self._hub.cancel_fades([member._key])
-                self._hub.start_fade(member._key, bytes(_CHANNELS), duration)
-                if member.hass is not None:
+                if not self._hub.start_fade(member._key, bytes(_CHANNELS), duration, now=now):
+                    member.complete_fade()
+                elif member.hass is not None:
                     member.async_write_ha_state()
             self.publish()
             self._hub.notify_light_states()
             return
+        for member in members:
+            member._off_when_fade_ends = False
+        self._attr_is_on = False
         self._paint(self._channels(), members)
         self._hub.notify_light_states()
 

@@ -118,7 +118,8 @@ def test_holiday_effects_follow_order_phase_and_speed():
 def test_fade_interpolation_and_cancellation():
     assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", 0) == b"\xff\x00\x00"
     assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", 1) == b"\x00\xff\x00"
-    assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", 0.5) == b"\x80\x80\x00"
+    # Gamma 2.2: the midpoint of a full-scale change is DMX 55, not 128.
+    assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", 0.5) == b"\x37\x37\x00"
     assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", 2) == b"\x00\xff\x00"
     assert interpolate(b"\xff\x00\x00", b"\x00\xff\x00", -1) == b"\xff\x00\x00"
 
@@ -138,6 +139,7 @@ def test_fade_interpolation_and_cancellation():
     assert finished["b"] == b"\x00\x00\xff"
     assert book.active is False
     assert book.started_at("b") is None
+    assert book.target_of("b") is None
     book.start("c", b"\x00\x00\x00", b"\x01\x00\x00", 0, 1)
     book.clear()
     assert book.active is False
@@ -420,7 +422,9 @@ async def test_transitions_interpolate_and_a_new_command_cancels_one_fixture(has
     hub.render_fades(started)
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\xff\x00\x00"
     hub.render_fades(started + 2)
-    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x80\x80\x00"
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == interpolate(
+        b"\xff\x00\x00", b"\x00\xff\x00", 0.5
+    )
     assert bytes(hub._buffers[SUPPLY_HOST][3:6]) == interpolate(b"\x00\x00\xff", b"\x00\xff\x00", 0.5)
 
     await hass.services.async_call(
@@ -594,10 +598,11 @@ async def test_transition_frame_rate_is_capped_and_recall_fades(hass, monkeypatc
         blocking=True,
     )
     assert hub.fades.contains("880055BE")
-    assert hass.states.get(one).state == STATE_OFF
+    assert hass.states.get(one).state == STATE_ON
     started, _duration = hub.fades.started_at("880055BE")
     hub.render_fades(started + 3)
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x00\x00\x00"
+    assert hass.states.get(one).state == STATE_OFF
 
 
 def test_strings_cover_the_new_ui_text():
@@ -616,6 +621,8 @@ def test_strings_cover_the_new_ui_text():
         assert described["fields"]["name"]["name"]
         assert described["fields"]["device_id"]["description"]
     assert strings["services"]["recall_look"]["fields"]["transition"]["description"]
+    assert strings["entity"]["number"]["default_fade"]["name"] == "Default fade (seconds)"
+    assert strings["options"]["step"]["output"]["data"]["default_fade"]
     for key in ("duplicate_look", "unknown_look", "look_name", "look_target"):
         assert strings["exceptions"][key]["message"]
 
@@ -826,7 +833,9 @@ async def test_animated_turn_on_fades_into_the_first_frame(hass, monkeypatch):
     assert hub.fades.contains("880055BE")
     started, duration = hub.fades.started_at("880055BE")
     hub.render_fades(started + duration / 2)
-    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\x80\x00\x00"
+    assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == interpolate(
+        b"\x00\x00\x00", b"\xff\x00\x00", 0.5
+    )
     hub.render_fades(started + duration)
     assert bytes(hub._buffers[SUPPLY_HOST][0:3]) == b"\xff\x00\x00"
     hub.render_frame(min(item.deadline for item in hub._deferred))

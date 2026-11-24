@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Lights fade on and off by default. Default fade (seconds) is a configuration number on the Data Enabler and a field in the options flow, from 0 to 10, starting at 1.5. 0 snaps. An explicit `transition` overrides it. The fade runs in the existing frame loop, one frame per Data Enabler per tick, on a gamma 2.2 curve. A command during a fade continues from the current level. The light reports off when a turn-off fade finishes.
+- Color temperature from 2000 K to 6500 K on every fixture, group, and All fixtures light, alongside RGB. Kelvin uses a blackbody approximation scaled so the brightest channel is 255. The mode and kelvin are restored after a restart. Effects that use the light's color use that RGB.
+
 ## 0.2.0
 
 - A clean-room effect pack for eight fixtures: Solid, Breathe, Fade, Colorloop, Heartbeat, Sunrise, Gradient, Rainbow, Rainbow cycle, Wipe, Sweep, Theater chase, Running lights, Chase color, Scanner, Dual scanner, Meteor, Palette flow, Ripple, Twinkle, Twinkle fade, Candle, Fireplace, Lightning, Police, Alternate, Christmas, Christmas chase, and Halloween. WLED source is not included.

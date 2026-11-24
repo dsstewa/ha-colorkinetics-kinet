@@ -29,6 +29,8 @@ pytestmark = pytest.mark.usefixtures("enable_custom_integrations", "fake_udp")
 
 
 def _entry(**options):
+    """Build a config entry. ``omit_default_fade`` leaves the product default."""
+    omit_default_fade = options.pop("omit_default_fade", False)
     supplies = {
         SUPPLY_HOST: {
             "ip": SUPPLY_HOST,
@@ -48,8 +50,11 @@ def _entry(**options):
         "portout_version": 1,
         "output_port": 1,
         "manual_fixtures": "",
+        "default_fade": 0,
     }
     base.update(options)
+    if omit_default_fade:
+        base.pop("default_fade", None)
     return MockConfigEntry(
         domain=DOMAIN,
         data={"hosts": [SUPPLY_HOST], "supplies": supplies},

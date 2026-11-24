@@ -1,23 +1,49 @@
 """Per-fixture channel fades drawn by the frame loop.
 
 A fade belongs to one fixture. A newer command cancels it for the fixtures
-that command takes. Interpolation is linear in channel space and uses integer
-math so the midpoint of a full-scale change is 128.
+that command takes and starts again from the bytes currently in the buffer.
+
+Interpolation is gamma-aware. Progress is linear in perceived brightness
+(gamma 2.2). The DMX byte is the linear intensity that produces that step,
+so a fade does not jump bright in the first half. Endpoints are exact: a
+perceived level round-trips through every channel byte, and the integer
+blend uses thousandths.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+_GAMMA = 2.2
+
+
+def _perceived_mils(value: int) -> int:
+    """Linear channel byte as a perceived level from 0 to 1000."""
+    unit = (max(0, min(255, int(value))) / 255.0) ** (1.0 / _GAMMA)
+    return int(round(unit * 1000.0))
+
+
+def _channel_from_perceived(mils: int) -> int:
+    """Perceived level, 0 to 1000, back to a linear channel byte."""
+    perceived = max(0, min(1000, int(mils))) / 1000.0
+    linear = perceived**_GAMMA
+    return max(0, min(255, int(round(linear * 255.0))))
+
 
 def interpolate(start: bytes, target: bytes, progress: float) -> bytes:
-    """Blend ``start`` toward ``target``. ``progress`` is clamped to 0..1."""
+    """Blend ``start`` toward ``target``. ``progress`` is clamped to 0..1.
+
+    The blend is linear in perceived brightness. The midpoint of a full-scale
+    change is DMX 55, which is about half as bright to the eye as full.
+    """
     clamped = min(1.0, max(0.0, float(progress)))
     step = int(round(clamped * 1000))
     blended = bytearray(len(start))
     for index, (origin, dest) in enumerate(zip(start, target, strict=False)):
-        value = (int(origin) * (1000 - step) + int(dest) * step + 500) // 1000
-        blended[index] = max(0, min(255, value))
+        perceived = (
+            _perceived_mils(origin) * (1000 - step) + _perceived_mils(dest) * step + 500
+        ) // 1000
+        blended[index] = _channel_from_perceived(perceived)
     return bytes(blended)
 
 

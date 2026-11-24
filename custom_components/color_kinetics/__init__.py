@@ -51,7 +51,14 @@ async def async_unload_entry(
 async def async_reload_entry(
     hass: HomeAssistant, entry: ColorKineticsConfigEntry
 ) -> None:
-    """Reload after options change."""
+    """Reload after options change.
+
+    Moving the default fade does not reload. The number entity writes that
+    option often, and a reload would drop the socket and the frame loop.
+    """
+    hub = getattr(entry, "runtime_data", None)
+    if hub is not None and hub.absorb_fade_option():
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

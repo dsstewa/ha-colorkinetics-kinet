@@ -72,6 +72,7 @@ async def test_user_flow_creates_an_entry_for_one_or_more_supplies(hass, probes)
     assert result["options"]["protocol"] == "portout"
     assert result["options"]["portout_version"] == 1
     assert result["options"]["output_port"] == 1
+    assert result["options"]["default_fade"] == 1.5
     assert result["result"].unique_id == "7F00EB83"
     await hass.async_block_till_done()
     assert probes == ["172.16.10.41", "172.16.10.42"]
@@ -218,6 +219,7 @@ async def test_options_flow_updates_protocol_manual_fixtures_and_hosts(hass, pro
             CONF_PORTOUT_VERSION: "2",
             CONF_OUTPUT_PORT: 4,
             CONF_MANUAL_FIXTURES: "172.16.10.41, 880055BE, 1, Oak left",
+            "default_fade": 2.5,
         },
     )
     assert saved["type"] is FlowResultType.CREATE_ENTRY
@@ -227,6 +229,7 @@ async def test_options_flow_updates_protocol_manual_fixtures_and_hosts(hass, pro
     assert entry.options[CONF_OUTPUT_PORT] == 4
     assert "880055BE" in entry.options[CONF_MANUAL_FIXTURES]
     assert entry.options[CONF_HOSTS] == ["172.16.10.41", "172.16.10.42"]
+    assert entry.options["default_fade"] == 2.5
 
 
 async def test_replacing_the_supply_frees_its_serial_for_a_new_entry(hass, probes):

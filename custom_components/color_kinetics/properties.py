@@ -40,6 +40,7 @@ SUFFIX_EFFECT_SPEED = "effect_speed"
 SUFFIX_EFFECT_INTENSITY = "effect_intensity"
 SUFFIX_EFFECT_PALETTE = "effect_palette"
 SUFFIX_EFFECT_DIRECTION = "effect_direction"
+SUFFIX_DEFAULT_FADE = "default_fade"
 SUFFIX_LOOK = "look"
 
 

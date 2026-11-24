@@ -37,8 +37,11 @@ from .const import (
     MAX_FPS,
 )
 from .entry_data import (
+    clamp_fade_seconds,
+    fade_seconds_of,
     hosts_of,
     manual_text_of,
+    options_signature,
     output_settings_of,
     supplies_of,
 )
@@ -62,6 +65,7 @@ from .properties import (
     GEN4_FIXTURE_PROPS,
     SUFFIX_ALL_FIXTURES,
     SUFFIX_DMX,
+    SUFFIX_DEFAULT_FADE,
     SUFFIX_EFFECT_DIRECTION,
     SUFFIX_EFFECT_INTENSITY,
     SUFFIX_EFFECT_PALETTE,
@@ -241,6 +245,9 @@ class ColorKineticsHub:
         self.intensity_entities: dict[str, Any] = {}
         self.palette_entities: dict[str, Any] = {}
         self.direction_entities: dict[str, Any] = {}
+        self.fade_entities: dict[str, Any] = {}
+        self._default_fade = fade_seconds_of(entry)
+        self._options_signature = options_signature(dict(entry.options))
         self._locks: dict[str, asyncio.Lock] = {}
         self._supply_device_ids: dict[str, str] = {}
         self._stopped = False
@@ -404,6 +411,27 @@ class ColorKineticsHub:
             "direction": self.effect_direction(owner),
         }
 
+    @property
+    def default_fade(self) -> float:
+        """Seconds to fade when a light command omits ``transition``. 0 snaps."""
+        return self._default_fade
+
+    def set_default_fade(self, seconds: Any) -> None:
+        """Store the default fade and show it on each Data Enabler number."""
+        self._default_fade = clamp_fade_seconds(seconds)
+        for entity in self.fade_entities.values():
+            entity.apply_fade(self._default_fade)
+
+    def absorb_fade_option(self) -> bool:
+        """Apply a fade-only options write without reloading. False reloads."""
+        if self._stopped:
+            return False
+        signature = options_signature(dict(self.entry.options))
+        if signature != self._options_signature:
+            return False
+        self.set_default_fade(fade_seconds_of(self.entry))
+        return True
+
     def effect_clock(self) -> float:
         """Monotonic time base for effect frames and fades."""
         return time.monotonic()
@@ -488,11 +516,15 @@ class ColorKineticsHub:
         start = fixture.dmx_start
         return bytes(buffer[start : start + CHANNELS_PER_FIXTURE])
 
-    def start_fade(self, key: str, target: bytes, duration: float) -> None:
+    def start_fade(
+        self, key: str, target: bytes, duration: float, now: float | None = None
+    ) -> bool:
         """Fade one fixture toward ``target`` through the frame loop.
 
-        A zero duration, or a target that is already showing, writes at once.
-        An unavailable fixture is left alone so its saved bytes stay put.
+        A zero duration, or a target that is already showing, writes at once
+        and returns false. An unavailable fixture is left alone so its saved
+        bytes stay put. ``now`` is shared by a group so every member starts
+        together. One later frame tick sends one datagram for the supply.
         """
         fixture = self.get_fixture(key)
         if (
@@ -502,28 +534,45 @@ class ColorKineticsHub:
             or not self.is_available(fixture)
         ):
             self.fades.cancel([key])
-            return
+            return False
         current = self._fixture_channel_bytes(fixture)
-        if not self.fades.start(key, current, bytes(target), self.effect_clock(), duration):
+        moment = self.effect_clock() if now is None else float(now)
+        if not self.fades.start(key, current, bytes(target), moment, duration):
             self.fades.cancel([key])
             self.write_channels(fixture.host, fixture.dmx_start, bytes(target))
-            return
+            return False
         self.ensure_effect_loop()
+        return True
 
     def render_fades(self, now: float) -> None:
-        """Write one fade step. Effect-owned fixtures are not overwritten."""
+        """Write one fade step for every fixture, then one send per supply.
+
+        A fade that reaches its target is removed. A turn-off fade then marks
+        that light off. Effect-owned fixtures are not overwritten.
+        """
         dirty: set[str] = set()
+        finished: list[str] = []
         for key, payload in self.fades.frames(now).items():
             if key in self.effects.owners:
                 self.fades.cancel([key])
                 continue
             fixture = self.get_fixture(key)
             if fixture is None or fixture.dmx_start is None or not self.is_available(fixture):
+                if not self.fades.contains(key):
+                    finished.append(key)
                 continue
             if self.write_channels(fixture.host, fixture.dmx_start, payload, schedule=False):
                 dirty.add(fixture.host)
+            if not self.fades.contains(key):
+                finished.append(key)
         for host in dirty:
             self.pump.mark_dirty(host)
+        for key in finished:
+            light = self.fixture_lights.get(key)
+            if light is not None:
+                light.complete_fade()
+        if finished:
+            self.notify_light_states()
 
     def render_effects(self, now: float) -> None:
         """Write one effect frame into the buffers and schedule a send."""
@@ -638,6 +687,8 @@ class ColorKineticsHub:
                 "is_on": is_on,
                 "brightness": brightness,
                 "rgb": [rgb[0], rgb[1], rgb[2]],
+                "color_mode": light.color_mode,
+                "color_temp_kelvin": light.color_temp_kelvin,
             }
         lights: dict[str, Any] = {}
         for light in (*self.supply_lights.values(), *self.group_lights.values()):
@@ -949,6 +1000,8 @@ class ColorKineticsHub:
         self._restore_saved_channels()
         self._register_supply_devices()
         self._drop_stale_registry_entries()
+        self._default_fade = fade_seconds_of(self.entry)
+        self._options_signature = options_signature(dict(self.entry.options))
         self.pump.start()
 
     async def async_stop(self) -> None:
@@ -1422,6 +1475,7 @@ class ColorKineticsHub:
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_PALETTE}")
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_DIRECTION}")
             keep.add(f"{ident}:{SUFFIX_LOOK}")
+            keep.add(f"{ident}:{SUFFIX_DEFAULT_FADE}")
             keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
             keep.add(f"{ident}:{SUFFIX_RAW}")
         for group in self.light_groups():

@@ -42,14 +42,16 @@
           "protocol": "Light protocol",
           "portout_version": "PORTOUT header version",
           "output_port": "Output port",
-          "manual_fixtures": "Manual fixtures"
+          "manual_fixtures": "Manual fixtures",
+          "default_fade": "Default fade (seconds)"
         },
         "data_description": {
           "hosts": "One IPv4 address per line. A new address is polled before it is saved. Removing an address stops sending to that supply.",
           "protocol": "PORTOUT is KiNET v2. DMXOUT is KiNET v1.",
           "portout_version": "1 writes 01 00 (OLA). 2 writes 02 00 (Haukcode). Ignored for DMXOUT.",
           "output_port": "Physical output on the Data Enabler, 1 to 16. This supply uses port 1. Ignored for DMXOUT.",
-          "manual_fixtures": "One fixture per line if discovery misses it: serial_or_label, dmx_start[, label]. DMX start is 1-based, as QuickPlay shows it. An 8-digit hex token is a serial. With more than one supply, start the line with the supply IP. Example: 880055BE, 1, Oak left"
+          "manual_fixtures": "One fixture per line if discovery misses it: serial_or_label, dmx_start[, label]. DMX start is 1-based, as QuickPlay shows it. An 8-digit hex token is a serial. With more than one supply, start the line with the supply IP. Example: 880055BE, 1, Oak left",
+          "default_fade": "Seconds to fade when a light command does not set transition. 0 snaps on and off. 1.5 is the default."
         }
       },
       "fixture_order": {
@@ -139,6 +141,9 @@
       },
       "effect_intensity": {
         "name": "Effect intensity"
+      },
+      "default_fade": {
+        "name": "Default fade (seconds)"
       }
     },
     "select": {

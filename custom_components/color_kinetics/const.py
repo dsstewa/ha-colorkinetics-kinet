@@ -15,6 +15,7 @@ CONF_OUTPUT_PORT: Final = "output_port"
 CONF_MANUAL_FIXTURES: Final = "manual_fixtures"
 CONF_FIXTURE_ORDER: Final = "fixture_order"
 CONF_GROUPS: Final = "groups"
+CONF_DEFAULT_FADE: Final = "default_fade"
 
 PROTOCOL_PORTOUT: Final = "portout"
 PROTOCOL_DMXOUT: Final = "dmxout"
@@ -31,5 +32,9 @@ DEFAULT_EFFECT_SPEED: Final = 5
 DEFAULT_EFFECT_INTENSITY: Final = 5
 DEFAULT_EFFECT_PALETTE: Final = "Custom"
 DEFAULT_EFFECT_DIRECTION: Final = "Forward"
+
+DEFAULT_FADE_SECONDS: Final = 1.5
+MIN_COLOR_TEMP_KELVIN: Final = 2000
+MAX_COLOR_TEMP_KELVIN: Final = 6500
 
 PLATFORMS: Final = ["light", "button", "sensor", "number", "select"]
