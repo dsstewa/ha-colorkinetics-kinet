@@ -79,11 +79,11 @@ All fixtures and each group light accept an effect. The list below is the order 
 | Candle | A gentle per-fixture flicker that stays lit. | Depth of the flicker. |
 | Fireplace | One warm flicker across the run. | Depth of the shared flicker. |
 | Lightning | Dim, then one flash per cycle, with one fixture leading it. | How long that single flash lasts. |
-| Police | Even and odd fixtures swap two colors. Custom is red and blue. | How long each color holds before the blend. |
-| Alternate | The light's color and off swap between even and odd fixtures. | How long each half holds. 5 is the 30% blend. |
-| Christmas | Red and green swap between even and odd fixtures. | How long each half holds. 5 is the 30% blend. |
+| Police | Even and odd fixtures swap two colors. Custom is red and blue. | How long each color holds before it blends. Higher holds longer. 5 is the 30% blend. |
+| Alternate | The light's color and off swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
+| Christmas | Red and green swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
 | Christmas chase | Red, green, and white slide along the order. | Stripe width. 8 and above are two fixtures wide. |
-| Halloween | Orange and purple swap between even and odd fixtures. | How long each half holds. 5 is the 30% blend. |
+| Halloween | Orange and purple swap between even and odd fixtures. | How long each half holds before it blends. Higher holds longer. 5 is the 30% blend. |
 
 Effects use the selected palette where a palette makes sense. Rainbow, Rainbow cycle, Christmas, Christmas chase, Halloween, Candle, and Fireplace keep their own colors (Candle and Fireplace stay warm and can take a tint from another palette). Brightness still scales every channel.
 

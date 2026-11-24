@@ -137,6 +137,23 @@ def test_palettes_recolor_effects_that_read_them_and_holiday_colors_stay():
     assert fixture_channels("Solid", 0, 1, 0.2, (0, 255, 0), 255) == b"\x00\xff\x00"
 
 
+def test_higher_intensity_holds_two_color_effects_longer():
+    """Intensity 10 is still a solid color when intensity 1 has started to blend.
+
+    Phase 0.35 is 70% of the way through a half cycle. Intensity 5 keeps the
+    historical hold, so phase 0.425 is still the midpoint of the last 30%.
+    """
+    held = fixture_channels("Police", 0, 2, 0.35, (1, 2, 3), 255, intensity=10)
+    blending = fixture_channels("Police", 0, 2, 0.35, (1, 2, 3), 255, intensity=1)
+    assert held == b"\xff\x00\x00"
+    assert blending != held
+    assert fixture_channels("Christmas", 0, 2, 0.425, (1, 2, 3), 255) == b"\x80\x80\x00"
+    readme = (ROOT / "README.md").read_text()
+    for name in ("Police", "Alternate", "Christmas", "Halloween"):
+        assert "Higher holds longer" in INTENSITY_NOTES[name]
+        assert INTENSITY_NOTES[name] in readme
+
+
 def test_old_names_resolve_and_default_frames_still_match():
     """A saved scene that sends a 0.1.x name still draws that effect's old frame."""
     assert resolve_effect(EFFECT_STATIC) == EFFECT_SOLID

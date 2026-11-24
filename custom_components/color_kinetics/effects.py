@@ -17,9 +17,10 @@ actually being drawn. Unavailable fixtures are omitted by the caller and are
 not written.
 
 Holiday effects use fixed palettes. Brightness still scales every channel.
-Christmas, Halloween, and Alternate each hold one of two colors for a half
-cycle, then blend into the other over the last 30% of that half when intensity
-is 5. The blend is drawn by the existing frame loop. Warm twinkle is a
+Christmas, Halloween, Alternate, and Police each hold one of two colors for a
+half cycle, then blend into the other. Intensity 5 blends over the last 30% of
+that half. A higher intensity holds each color longer. The blend is drawn by
+the existing frame loop. Warm twinkle is a
 deterministic sparkle, so the same phase always draws the same frame. Latest
 command wins: a fixture belongs to at most one running effect.
 """
@@ -145,11 +146,11 @@ INTENSITY_NOTES = {
     EFFECT_CANDLE: "Depth of each fixture's flicker. The fixture never goes out.",
     EFFECT_FIREPLACE: "Depth of the shared warm flicker.",
     EFFECT_LIGHTNING: "How long the single flash lasts. It still happens once per cycle.",
-    EFFECT_POLICE: "How snappy the red/blue swap is. Higher holds each color longer.",
-    EFFECT_ALTERNATE: "How long each half holds before it blends. 5 matches the 30% blend.",
-    EFFECT_CHRISTMAS: "How long each half holds before it blends. 5 matches the 30% blend.",
+    EFFECT_POLICE: "How long each color holds before it blends. Higher holds longer. 5 is the 30% blend.",
+    EFFECT_ALTERNATE: "How long each half holds before it blends. Higher holds longer. 5 is the 30% blend.",
+    EFFECT_CHRISTMAS: "How long each half holds before it blends. Higher holds longer. 5 is the 30% blend.",
     EFFECT_CHRISTMAS_CHASE: "Stripe width. 8 and above are two fixtures wide.",
-    EFFECT_HALLOWEEN: "How long each half holds before it blends. 5 matches the 30% blend.",
+    EFFECT_HALLOWEEN: "How long each half holds before it blends. Higher holds longer. 5 is the 30% blend.",
 }
 
 PALETTE_CHRISTMAS = "Christmas"
@@ -499,10 +500,14 @@ def _sample(palette: str, position: float, rgb: Color, custom: tuple[Color, ...]
 
 
 def _hold_for(intensity: int) -> float:
-    """Half-cycle hold. Intensity 5 is the historical 70% hold."""
+    """Fraction of each half cycle spent on one color before the blend.
+
+    Intensity 5 is the historical 70% hold, so the blend is the last 30%.
+    A higher intensity holds longer (intensity 10 holds 90%, intensity 1 holds 54%).
+    """
     if intensity == DEFAULT_EFFECT_INTENSITY:
         return _CROSSFADE_HOLD
-    return min(0.90, max(0.40, _CROSSFADE_HOLD + (5 - intensity) * 0.04))
+    return min(0.90, max(0.40, _CROSSFADE_HOLD + (intensity - 5) * 0.04))
 
 
 def _wave(phase: float) -> float:
