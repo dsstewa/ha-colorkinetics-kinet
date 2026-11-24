@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 
 from .const import (
+    CONF_DEFAULT_FADE,
     CONF_HOSTS,
     CONF_MANUAL_FIXTURES,
     CONF_OUTPUT_PORT,
     CONF_PORTOUT_VERSION,
     CONF_PROTOCOL,
     CONF_SUPPLIES,
+    DEFAULT_FADE_SECONDS,
     DEFAULT_OUTPUT_PORT,
     DEFAULT_PORTOUT_VERSION,
     DEFAULT_PROTOCOL,
@@ -62,3 +65,28 @@ def output_settings_of(entry: ConfigEntry) -> tuple[str, int, int]:
     if not 1 <= port <= 16:
         port = DEFAULT_OUTPUT_PORT
     return str(protocol), version, port
+
+
+def clamp_fade_seconds(value: Any, fallback: float = DEFAULT_FADE_SECONDS) -> float:
+    """Seconds for the default fade. 0 is instant. Values sit between 0 and 10."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if seconds <= 0:
+        return 0.0
+    return min(10.0, seconds)
+
+
+def fade_seconds_of(entry: ConfigEntry) -> float:
+    """Default fade stored on the entry. Missing or invalid values are 1.5 s."""
+    return clamp_fade_seconds(entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS))
+
+
+def options_signature(options: dict[str, Any]) -> str:
+    """Identity of every option except the default fade.
+
+    A fade-only change can be applied live. Anything else reloads the entry.
+    """
+    kept = {key: value for key, value in options.items() if key != CONF_DEFAULT_FADE}
+    return json.dumps(kept, sort_keys=True, default=str)

@@ -13,6 +13,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_DEFAULT_FADE,
     CONF_FIXTURE_ORDER,
     CONF_GROUPS,
     CONF_HOSTS,
@@ -21,6 +22,7 @@ from .const import (
     CONF_PORTOUT_VERSION,
     CONF_PROTOCOL,
     CONF_SUPPLIES,
+    DEFAULT_FADE_SECONDS,
     DEFAULT_OUTPUT_PORT,
     DEFAULT_PORTOUT_VERSION,
     DEFAULT_PROTOCOL,
@@ -28,7 +30,7 @@ from .const import (
     PROTOCOL_DMXOUT,
     PROTOCOL_PORTOUT,
 )
-from .entry_data import hosts_of, manual_text_of, supplies_of
+from .entry_data import clamp_fade_seconds, hosts_of, manual_text_of, supplies_of
 from .order import apply_submitted_order, merge_group_members
 from .manual import HostListError, ManualFixtureError, parse_host_list, parse_manual_fixtures
 from .protocol import KiNetError, SupplyInfo, async_probe_host, supply_entry_dict
@@ -63,6 +65,15 @@ _PORT_SELECTOR = selector.NumberSelector(
         mode=selector.NumberSelectorMode.BOX,
     )
 )
+_FADE_SELECTOR = selector.NumberSelector(
+    selector.NumberSelectorConfig(
+        min=0,
+        max=10,
+        step=0.1,
+        mode=selector.NumberSelectorMode.BOX,
+        unit_of_measurement="s",
+    )
+)
 
 USER_SCHEMA = probatio.Schema(
     {probatio.Required(CONF_HOSTS): _HOST_SELECTOR}
@@ -74,6 +85,7 @@ OPTIONS_SCHEMA = probatio.Schema(
         probatio.Required(CONF_PORTOUT_VERSION): _VERSION_SELECTOR,
         probatio.Required(CONF_OUTPUT_PORT): _PORT_SELECTOR,
         probatio.Required(CONF_MANUAL_FIXTURES): _MANUAL_SELECTOR,
+        probatio.Optional(CONF_DEFAULT_FADE): _FADE_SELECTOR,
     }
 )
 
@@ -155,6 +167,7 @@ class ColorKineticsConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_PORTOUT_VERSION: DEFAULT_PORTOUT_VERSION,
                             CONF_OUTPUT_PORT: DEFAULT_OUTPUT_PORT,
                             CONF_MANUAL_FIXTURES: "",
+                            CONF_DEFAULT_FADE: DEFAULT_FADE_SECONDS,
                         },
                     )
         return self.async_show_form(
@@ -446,6 +459,9 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             CONF_PORTOUT_VERSION: str(version),
             CONF_OUTPUT_PORT: port,
             CONF_MANUAL_FIXTURES: manual_text_of(entry),
+            CONF_DEFAULT_FADE: clamp_fade_seconds(
+                entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS)
+            ),
         }
 
     async def _build_options(self, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -486,4 +502,9 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             CONF_MANUAL_FIXTURES: str(user_input.get(CONF_MANUAL_FIXTURES) or ""),
             CONF_FIXTURE_ORDER: list(self._saved_order()),
             CONF_GROUPS: list(self._saved_groups()),
+            CONF_DEFAULT_FADE: clamp_fade_seconds(
+                user_input[CONF_DEFAULT_FADE]
+                if CONF_DEFAULT_FADE in user_input
+                else entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS)
+            ),
         }

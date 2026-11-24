@@ -35,7 +35,7 @@ The dialog sends one read-only supply poll per address (UDP port 6038). It does 
 - An **All fixtures** light on that device. It sets every available discovered fixture to the same color in one frame, in the saved fixture order.
 - Named groups (Tree Run, Oaks, and so on) from the options flow. Each group is its own light, with a stable id, and follows its own fixture order.
 - One device and one `light` per fixture, keyed by serial (`880055BE`, …). Renames and areas stick across restarts and rescans.
-- RGB color and brightness (`ColorMode.RGB`). State is optimistic and restored after a restart.
+- RGB color, brightness, and color temperature from 2000 K to 6500 K. State is optimistic and restored after a restart, including the last color mode and kelvin.
 - Fixture type `0x18` is **Blast PowerCore gen4 3-Ch**. Type `0x04` is **iW/iColor Burst Powercore**. A fixture that does not answer a property is still created. The DMX address needs both bytes (`0x40` and `0x41`) with status `0x09`. A missing or rejected high byte leaves the light unavailable instead of assuming the address is under 256.
 - Diagnostic sensors for the fields QuickPlay's values confirmed: DMX address, startup channels, gen4 scale factors, and the supply power time. Other captured properties sit on **Raw properties** without a guessed name. See `docs/PROPERTIES.md`.
 - A fixture has to be missing from two scans in a row before it becomes unavailable. Its last channel values stay in the frame. It is not deleted.
@@ -117,11 +117,38 @@ cards:
   - type: tile
     entity: select.data_enabler_pro_172_16_10_41_effect_direction
     name: Effect direction
+  - type: tile
+    entity: number.data_enabler_pro_172_16_10_41_default_fade_seconds
+    name: Default fade
 ```
 
 A fixture is in at most one effect. The latest command wins: starting an effect takes those fixtures away from any effect that had them. Turning a member on, or setting Solid, drops that fixture out of the effect and leaves it on the solid color. The effect continues on whatever fixtures it still owns. A group that has lost every fixture reports off with Solid, and turning that group off does not write fixtures another effect still owns.
 
-Fixture, group, and All fixtures lights accept a transition. The channels fade from what is on the wire to the new color, in the same frame loop (at most 40 times a second). The one-second keepalive and the send backoff are unchanged. Turning a light off with a transition fades those channels to zero. A newer command cancels the fade for the fixtures it takes and leaves every other fade running. Turning on an animated effect with a transition stops whatever effect those fixtures were in, fades each fixture to the new effect's first frame, then the effect runs. Recalling a look does the same for a saved effect: the fade target is that first frame.
+Fixture, group, and All fixtures lights fade. See [Fade / transition](#fade--transition) and [Color temperature](#color-temperature). An animated effect does not use the default fade. Pass `transition` to fade into that effect's first frame, then the effect runs. Recalling a look with `transition` does the same for a saved effect.
+
+## Fade / transition
+
+Every fixture, group, and All fixtures light accepts Home Assistant's `transition` attribute, in seconds. `turn_on` fades from the color on the wire to the new color and brightness. Brightness and color changes do the same. `turn_off` fades the channels to zero and the light reports off when the fade finishes.
+
+The fade runs in the existing frame loop, at most 40 times a second. One tick writes every fixture that is fading and sends one KiNET datagram for the Data Enabler. The one-second keepalive and the send backoff are unchanged.
+
+The blend is gamma-aware. Time moves in even steps of perceived brightness (gamma 2.2), and the DMX byte is the linear intensity for that step. A fade from off to full is DMX 55 at the halfway mark, so the ramp does not jump bright in the first half. A full-scale color mix, such as red to green, is the same curve on each channel.
+
+When a call leaves `transition` out, the Data Enabler's **Default fade (seconds)** is used. That number sits on the Data Enabler device, in the configuration section, from 0 to 10 in steps of 0.1. It starts at 1.5. The same field is in the options flow under Light output. The value is stored on the config entry and comes back after a restart. 0 snaps, which is how 0.2.0 behaved.
+
+A scene or script that sets `transition` gets that number, including `0`. A new command while a fade is running starts a new fade from the level on the wire, so the output does not jump. A group command uses one duration and one start time for every member.
+
+Starting an effect does not use the default fade. Pass `transition` to fade into the effect's first frame; the effect then runs. `recall_look` still changes at once unless you pass `transition`.
+
+## Color temperature
+
+Fixture, group, and All fixtures lights support color temperature alongside RGB. `supported_color_modes` is `color_temp` and `rgb`. The slider runs from 2000 K to 6500 K.
+
+Kelvin is converted with Tanner Helland's blackbody approximation and scaled so the brightest channel is 255. Brightness is applied after that. 2000 K is warm (red, almost no blue). 6500 K is cool daylight, close to white. The DMX frame uses that RGB.
+
+Setting `color_temp_kelvin` reports `color_mode: color_temp` and that kelvin. Setting `rgb_color` or `hs_color` reports `color_mode: rgb`. The mode, the kelvin, and the RGB are restored after a restart. A color-temperature change uses the same fade as any other color change. Effects that take the light's color, such as Chase color on the Custom palette, use the RGB derived from the kelvin.
+
+Home Assistant draws its own swatch for `color_temp` from the kelvin. That swatch can differ by a few steps from the DMX bytes, which follow the formula above.
 
 ## Saved looks
 
@@ -169,6 +196,7 @@ Open the integration's **Configure** dialog:
 | PORTOUT header version | 1 (`01 00`, OLA) | Try 2 (`02 00`, Haukcode) if the lights stay dark on v2. Ignored for DMXOUT. |
 | Output port | 1 | This Data Enabler Pro has a single output, port 1. Ignored for DMXOUT. |
 | Manual fixtures | empty | Used when discovery misses a fixture. |
+| Default fade (seconds) | 1.5 | Fade when a light command omits `transition`. 0 snaps. Also the Default fade number on the Data Enabler. |
 
 Manual line format, DMX start **1-based** (the number QuickPlay shows):
 
@@ -236,7 +264,7 @@ Python 3.14 and Home Assistant 2026.10 (what `pytest-homeassistant-custom-compon
 
 ```bash
 pip install -r requirements_test.txt
-pytest --cov=custom_components/color_kinetics --cov-report=term-missing --cov-fail-under=90
+pytest --cov=custom_components/color_kinetics --cov-report=term-missing --cov-fail-under=95
 ```
 
 CI runs that suite, hassfest, and HACS validation. Coverage fails under 90% line coverage. Tests use the captured QuickPlay packets and OLA's DMXOUT/PORTOUT vectors. They do not open a real KiNET socket.

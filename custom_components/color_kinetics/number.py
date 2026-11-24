@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DEFAULT_EFFECT_INTENSITY, DEFAULT_EFFECT_SPEED
+from .const import CONF_DEFAULT_FADE, DEFAULT_EFFECT_INTENSITY, DEFAULT_EFFECT_SPEED
+from .entry_data import clamp_fade_seconds
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub
-from .properties import SUFFIX_EFFECT_INTENSITY, SUFFIX_EFFECT_SPEED
+from .properties import SUFFIX_DEFAULT_FADE, SUFFIX_EFFECT_INTENSITY, SUFFIX_EFFECT_SPEED
 
 
 async def async_setup_entry(
@@ -20,9 +21,10 @@ async def async_setup_entry(
     """Add speed and intensity sliders per All-fixtures light and per named group."""
     hub = entry.runtime_data
     entities: dict[str, EffectSpeed | EffectIntensity] = {}
+    fades: dict[str, DefaultFade] = {}
 
     def _sync() -> None:
-        added: list[EffectSpeed | EffectIntensity] = []
+        added: list[EffectSpeed | EffectIntensity | DefaultFade] = []
         for owner, kind in _owners(hub):
             for factory, suffix, registry in (
                 (EffectSpeed, SUFFIX_EFFECT_SPEED, hub.speed_entities),
@@ -37,6 +39,16 @@ async def async_setup_entry(
                 elif entity.hass is not None:
                     entity.refresh()
                 registry[owner] = entity
+        for host in hub.hosts:
+            unique_id = f"{hub.supply_identifier(host)}:{SUFFIX_DEFAULT_FADE}"
+            fade = fades.get(unique_id)
+            if fade is None:
+                fade = DefaultFade(hub, host, unique_id)
+                fades[unique_id] = fade
+                added.append(fade)
+            elif fade.hass is not None:
+                fade.refresh()
+            hub.fade_entities[host] = fade
         if added:
             async_add_entities(added)
 
@@ -200,5 +212,58 @@ class EffectIntensity(RestoreNumber, NumberEntity):
     def refresh(self) -> None:
         """Follow a renamed group or a replaced supply device."""
         self._apply_identity()
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+
+class DefaultFade(NumberEntity):
+    """Seconds to fade when a light command does not pass ``transition``.
+
+    0 snaps, which is the 0.2.0 behavior. The value is stored on the config
+    entry, so a restart brings the same default back.
+    """
+
+    _attr_native_min_value = 0
+    _attr_native_max_value = 10
+    _attr_native_step = 0.1
+    _attr_mode = NumberMode.BOX
+    _attr_should_poll = False
+    _attr_icon = "mdi:timer-outline"
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = SUFFIX_DEFAULT_FADE
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, hub: ColorKineticsHub, host: str, unique_id: str) -> None:
+        """Bind the number to one Data Enabler. The value is shared by the entry."""
+        self._hub = hub
+        self._host = host
+        self._attr_unique_id = unique_id
+        self._attr_native_value = hub.default_fade
+        self._attr_device_info = hub.supply_device_info(host)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Store the fade. The next light command that omits transition uses it."""
+        clamped = clamp_fade_seconds(value, fallback=self._hub.default_fade)
+        self._attr_native_value = clamped
+        self._hub.set_default_fade(clamped)
+        self.async_write_ha_state()
+        options = dict(self._hub.entry.options)
+        if options.get(CONF_DEFAULT_FADE) == clamped:
+            return
+        options[CONF_DEFAULT_FADE] = clamped
+        self.hass.config_entries.async_update_entry(self._hub.entry, options=options)
+
+    def apply_fade(self, value: float) -> None:
+        """Show a value written from the options flow or another supply's number."""
+        self._attr_native_value = float(value)
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    def refresh(self) -> None:
+        """Follow a replaced supply device."""
+        self._attr_device_info = self._hub.supply_device_info(self._host)
+        self._attr_native_value = self._hub.default_fade
         if self.hass is not None:
             self.async_write_ha_state()

@@ -35,7 +35,7 @@ jobs:
           --cov=custom_components/color_kinetics
           --cov-report=term-missing
           --cov-report=xml
-          --cov-fail-under=90
+          --cov-fail-under=95
 
   hassfest:
     name: Hassfest

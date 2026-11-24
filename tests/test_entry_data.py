@@ -6,8 +6,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.color_kinetics.const import DOMAIN
 from custom_components.color_kinetics.entry_data import (
+    clamp_fade_seconds,
+    fade_seconds_of,
     hosts_of,
     manual_text_of,
+    options_signature,
     output_settings_of,
     supplies_of,
 )
@@ -59,3 +62,20 @@ def test_readers_fall_back_to_data_and_defaults():
             options={"portout_version": 9, "output_port": "nope"},
         )
     ) == ("portout", 1, 1)
+
+
+def test_default_fade_clamps_and_ignores_the_fade_in_the_options_signature():
+    assert clamp_fade_seconds("nope") == 1.5
+    assert clamp_fade_seconds(None, fallback=0.5) == 0.5
+    assert clamp_fade_seconds(-3) == 0.0
+    assert clamp_fade_seconds(0) == 0.0
+    assert clamp_fade_seconds(12) == 10.0
+    assert clamp_fade_seconds(2.5) == 2.5
+    missing = MockConfigEntry(domain=DOMAIN, data={}, options={})
+    assert fade_seconds_of(missing) == 1.5
+    stored = MockConfigEntry(domain=DOMAIN, data={}, options={"default_fade": 0})
+    assert fade_seconds_of(stored) == 0.0
+    assert options_signature({"default_fade": 1.5, "protocol": "portout"}) == options_signature(
+        {"protocol": "portout", "default_fade": 9}
+    )
+    assert options_signature({"protocol": "portout"}) != options_signature({"protocol": "dmxout"})
