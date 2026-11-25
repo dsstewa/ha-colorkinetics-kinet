@@ -314,6 +314,23 @@ class FixtureLight(RestoreEntity, LightEntity):
             payload = bytes(_CHANNELS)
         self._hub.write_channels(fixture.host, fixture.dmx_start, payload)
 
+    def apply_panel_color(self, rgb: tuple[int, int, int], brightness: int) -> None:
+        """Paint one fixture from a scene. The write is the normal light path.
+
+        Scene recall does not fade. The default fade stays on ordinary light
+        commands. Brightness 0 turns the fixture off and keeps the color.
+        """
+        self._off_when_fade_ends = False
+        self._attr_color_mode = ColorMode.RGB
+        self._attr_rgb_color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        self._attr_brightness = int(brightness)
+        self._attr_is_on = int(brightness) > 0
+        self._hub.release_fixture_effect(self._key)
+        self._hub.cancel_fades([self._key])
+        self._push()
+        if self.hass is not None:
+            self.async_write_ha_state()
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Set color and brightness. State is optimistic."""
         if kwargs.get(ATTR_BRIGHTNESS) == 0:

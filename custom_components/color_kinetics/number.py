@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_DEFAULT_FADE, DEFAULT_EFFECT_INTENSITY, DEFAULT_EFFECT_SPEED
 from .entry_data import clamp_fade_seconds
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub
-from .properties import SUFFIX_DEFAULT_FADE, SUFFIX_EFFECT_INTENSITY, SUFFIX_EFFECT_SPEED
+from .properties import (
+    SUFFIX_DEFAULT_FADE,
+    SUFFIX_EFFECT_INTENSITY,
+    SUFFIX_EFFECT_SPEED,
+    SUFFIX_PANEL_BRIGHTNESS,
+)
 
 
 async def async_setup_entry(
@@ -22,9 +27,10 @@ async def async_setup_entry(
     hub = entry.runtime_data
     entities: dict[str, EffectSpeed | EffectIntensity] = {}
     fades: dict[str, DefaultFade] = {}
+    brightness: dict[str, PanelBrightness] = {}
 
     def _sync() -> None:
-        added: list[EffectSpeed | EffectIntensity | DefaultFade] = []
+        added: list[EffectSpeed | EffectIntensity | DefaultFade | PanelBrightness] = []
         for owner, kind in _owners(hub):
             for factory, suffix, registry in (
                 (EffectSpeed, SUFFIX_EFFECT_SPEED, hub.speed_entities),
@@ -49,6 +55,14 @@ async def async_setup_entry(
             elif fade.hass is not None:
                 fade.refresh()
             hub.fade_entities[host] = fade
+            unique_id = f"{hub.supply_identifier(host)}:{SUFFIX_PANEL_BRIGHTNESS}"
+            level = brightness.get(unique_id)
+            if level is None:
+                level = PanelBrightness(hub, host, unique_id)
+                brightness[unique_id] = level
+                added.append(level)
+            elif level.hass is not None:
+                level.refresh()
         if added:
             async_add_entities(added)
 
@@ -212,6 +226,62 @@ class EffectIntensity(RestoreNumber, NumberEntity):
     def refresh(self) -> None:
         """Follow a renamed group or a replaced supply device."""
         self._apply_identity()
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+
+class PanelBrightness(RestoreNumber, NumberEntity):
+    """Brightness for the control panel, from 0 to 100 percent.
+
+    The number is the level Follow hub copies. Moving it updates the panel
+    target. The light entity's own brightness slider still accepts a direct
+    command.
+    """
+
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_mode = NumberMode.SLIDER
+    _attr_should_poll = False
+    _attr_icon = "mdi:brightness-6"
+    _attr_has_entity_name = True
+    _attr_translation_key = SUFFIX_PANEL_BRIGHTNESS
+    _attr_native_unit_of_measurement = PERCENTAGE
+
+    def __init__(self, hub: ColorKineticsHub, host: str, unique_id: str) -> None:
+        """Bind the slider to one Data Enabler."""
+        self._hub = hub
+        self._host = host
+        self._unsub = None
+        self._attr_unique_id = unique_id
+        self._attr_native_value = float(hub.panel_state(host)["brightness"])
+        self._attr_device_info = hub.supply_device_info(host)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last level when storage has no panel record yet."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self._hub.adopt_restore(self._host, brightness=float(last.native_value))
+        self._unsub = self._hub.add_panel_listener(self.refresh)
+        self.refresh()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop listening."""
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Store the level and push it to the current target."""
+        self._attr_native_value = float(value)
+        await self._hub.async_set_brightness(self._host, float(value))
+        self.async_write_ha_state()
+
+    def refresh(self) -> None:
+        """Show the level stored on the hub."""
+        self._attr_device_info = self._hub.supply_device_info(self._host)
+        self._attr_native_value = float(self._hub.panel_state(self._host)["brightness"])
         if self.hass is not None:
             self.async_write_ha_state()
 

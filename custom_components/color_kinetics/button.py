@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .hub import ColorKineticsConfigEntry, ColorKineticsHub, ScanInProgressError
+from .properties import SUFFIX_ALL_OFF, SUFFIX_STOP_EFFECT
 from .protocol import KiNetError
 
 
@@ -18,9 +19,17 @@ async def async_setup_entry(
     entry: ColorKineticsConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Add a rescan button for each configured Data Enabler."""
+    """Add rescan, stop, and all-off buttons for each configured Data Enabler."""
     hub = entry.runtime_data
-    async_add_entities(RescanButton(hub, host) for host in hub.hosts)
+    async_add_entities(
+        entity
+        for host in hub.hosts
+        for entity in (
+            RescanButton(hub, host),
+            StopEffectButton(hub, host),
+            AllOffButton(hub, host),
+        )
+    )
 
 
 class RescanButton(ButtonEntity):
@@ -55,3 +64,43 @@ class RescanButton(ButtonEntity):
             raise HomeAssistantError(
                 f"Fixture scan of {self._host} failed. Previous fixtures were kept."
             ) from err
+
+
+class StopEffectButton(ButtonEntity):
+    """Stop the panel effect and leave the current colors on the wire."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = SUFFIX_STOP_EFFECT
+    _attr_icon = "mdi:stop"
+    _attr_should_poll = False
+
+    def __init__(self, hub: ColorKineticsHub, host: str) -> None:
+        """Bind the button to one supply."""
+        self._hub = hub
+        self._host = host
+        self._attr_unique_id = f"{hub.supply_identifier(host)}:{SUFFIX_STOP_EFFECT}"
+        self._attr_device_info = hub.supply_device_info(host)
+
+    async def async_press(self) -> None:
+        """Stop the effect on the panel target."""
+        await self._hub.async_stop_effect(self._host)
+
+
+class AllOffButton(ButtonEntity):
+    """Turn the panel target off through the normal light path."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = SUFFIX_ALL_OFF
+    _attr_icon = "mdi:lightbulb-off"
+    _attr_should_poll = False
+
+    def __init__(self, hub: ColorKineticsHub, host: str) -> None:
+        """Bind the button to one supply."""
+        self._hub = hub
+        self._host = host
+        self._attr_unique_id = f"{hub.supply_identifier(host)}:{SUFFIX_ALL_OFF}"
+        self._attr_device_info = hub.supply_device_info(host)
+
+    async def async_press(self) -> None:
+        """Turn every fixture in the panel target off."""
+        await self._hub.async_all_off(self._host)

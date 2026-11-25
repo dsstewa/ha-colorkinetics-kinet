@@ -42,6 +42,12 @@ SUFFIX_EFFECT_PALETTE = "effect_palette"
 SUFFIX_EFFECT_DIRECTION = "effect_direction"
 SUFFIX_DEFAULT_FADE = "default_fade"
 SUFFIX_LOOK = "look"
+SUFFIX_PANEL_EFFECT = "panel_effect"
+SUFFIX_PANEL_SCENE = "panel_scene"
+SUFFIX_PANEL_TARGET = "panel_target"
+SUFFIX_PANEL_BRIGHTNESS = "brightness"
+SUFFIX_STOP_EFFECT = "stop_effect"
+SUFFIX_ALL_OFF = "all_off"
 
 
 def supply_serial_hex(serial: bytes) -> str:

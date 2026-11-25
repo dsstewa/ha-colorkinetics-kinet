@@ -14,6 +14,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_DEFAULT_FADE,
+    CONF_FOLLOW_ENTRY,
     CONF_FIXTURE_ORDER,
     CONF_GROUPS,
     CONF_HOSTS,
@@ -30,7 +31,18 @@ from .const import (
     PROTOCOL_DMXOUT,
     PROTOCOL_PORTOUT,
 )
-from .entry_data import clamp_fade_seconds, hosts_of, manual_text_of, supplies_of
+from .entry_data import clamp_fade_seconds, follow_of, hosts_of, manual_text_of, supplies_of
+from .scenes import (
+    PATTERN_ALTERNATE,
+    PATTERN_FIXTURES,
+    PATTERN_SOLID,
+    alternate_scene,
+    parse_color_text,
+    parse_fixture_lines,
+    scene_fixture_text,
+    solid_scene,
+)
+from .show import follow_problem, normalize_leader
 from .order import apply_submitted_order, merge_group_members
 from .manual import HostListError, ManualFixtureError, parse_host_list, parse_manual_fixtures
 from .protocol import KiNetError, SupplyInfo, async_probe_host, supply_entry_dict
@@ -118,6 +130,15 @@ def _title(supplies: dict[str, dict[str, Any]], hosts: list[str]) -> str:
     return f"Color Kinetics ({len(hosts)})"
 
 
+class FollowError(Exception):
+    """The chosen leader would cycle or is not a KiNet entry."""
+
+    def __init__(self, code: str) -> None:
+        """Store the options-flow error key."""
+        self.code = code
+        super().__init__(code)
+
+
 class ColorKineticsConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up one or more Data Enablers."""
 
@@ -168,6 +189,7 @@ class ColorKineticsConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_OUTPUT_PORT: DEFAULT_OUTPUT_PORT,
                             CONF_MANUAL_FIXTURES: "",
                             CONF_DEFAULT_FADE: DEFAULT_FADE_SECONDS,
+                            CONF_FOLLOW_ENTRY: "",
                         },
                     )
         return self.async_show_form(
@@ -207,7 +229,7 @@ class ColorKineticsOptionsFlow(OptionsFlow):
         """Choose light output, fixture order, or groups."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["output", "fixture_order", "groups"],
+            menu_options=["output", "fixture_order", "groups", "scenes"],
         )
 
     async def async_step_output(
@@ -219,6 +241,7 @@ class ColorKineticsOptionsFlow(OptionsFlow):
         entry = self.config_entry
         if user_input is not None:
             try:
+                self._check_follow(user_input)
                 options = await self._build_options(user_input)
             except HostListError as err:
                 errors[CONF_HOSTS] = err.code
@@ -228,6 +251,8 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             except KiNetError as err:
                 errors["base"] = "cannot_connect"
                 placeholders["host"] = getattr(err, "host", "") or ""
+            except FollowError as err:
+                errors[CONF_FOLLOW_ENTRY] = err.code
             else:
                 serial = options[CONF_SUPPLIES][options[CONF_HOSTS][0]]["serial_hex"]
                 self.hass.config_entries.async_update_entry(
@@ -239,7 +264,7 @@ class ColorKineticsOptionsFlow(OptionsFlow):
         current = self._suggested()
         return self.async_show_form(
             step_id="output",
-            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, current),
+            data_schema=self.add_suggested_values_to_schema(self._output_schema(), current),
             errors=errors,
             description_placeholders=placeholders,
         )
@@ -369,6 +394,211 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             description_placeholders={"name": current["name"] if current else "New group"},
         )
 
+    async def async_step_scenes(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pick a scene to edit, add one, or leave the list as it is."""
+        host = self._scene_host()
+        if host is None:
+            return await self.async_step_scene_host()
+        hub = self._hub()
+        names = hub.scene_names(host) if hub is not None else []
+        options: list[dict[str, str]] = [
+            {"value": "add", "label": "Add scene"},
+            {"value": "done", "label": "Done"},
+        ]
+        options[1:1] = [{"value": name, "label": name} for name in names]
+        if user_input is not None:
+            action = str(user_input["scene_action"])
+            if action == "done":
+                return self._save_preserved()
+            if action == "add":
+                self.context["scene_name"] = ""
+                return await self.async_step_scene_edit()
+            self.context["scene_name"] = action
+            return await self.async_step_scene_edit()
+        return self.async_show_form(
+            step_id="scenes",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required("scene_action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, sort=False)
+                    )
+                }
+            ),
+            description_placeholders={"host": host},
+        )
+
+    async def async_step_scene_host(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose which Data Enabler's scenes to edit when the entry has several."""
+        hosts = hosts_of(self.config_entry)
+        if len(hosts) == 1:
+            self.context["scene_host"] = hosts[0]
+            return await self.async_step_scenes()
+        if user_input is not None:
+            self.context["scene_host"] = str(user_input["scene_host"])
+            return await self.async_step_scenes()
+        options = [{"value": host, "label": host} for host in hosts]
+        return self.async_show_form(
+            step_id="scene_host",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required("scene_host"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options, sort=False)
+                    )
+                }
+            ),
+        )
+
+    async def async_step_scene_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Name a scene and set its colors. Per-fixture lines override the pattern."""
+        host = self._scene_host()
+        hub = self._hub()
+        if host is None or hub is None:
+            return self.async_show_form(
+                step_id="scene_edit",
+                data_schema=self._scene_schema(),
+                errors={"base": "cannot_connect"},
+                description_placeholders={"name": "New scene"},
+            )
+        previous = str(self.context.get("scene_name") or "")
+        current = hub.scene_record(host, previous) if previous else None
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if user_input.get("delete") and current is not None:
+                await hub.async_delete_scene(host, previous)
+                self.context["scene_name"] = ""
+                return await self.async_step_scenes()
+            scene, error = self._scene_from_input(user_input)
+            if error is not None or scene is None:
+                errors["base"] = error or "invalid_scene"
+            else:
+                saved = await hub.async_upsert_scene(
+                    host,
+                    str(user_input.get("name") or ""),
+                    scene,
+                    previous=previous or None,
+                )
+                if saved is not None:
+                    errors["name"] = saved
+                else:
+                    self.context["scene_name"] = ""
+                    return await self.async_step_scenes()
+        keys = hub.target_keys(host) if current is not None else []
+        if not keys:
+            keys = [
+                fixture.serial_hex
+                for fixture in hub.fixtures()
+                if fixture.host == host and fixture.serial_hex
+            ]
+        suggested = self._scene_suggested(current, keys)
+        return self.async_show_form(
+            step_id="scene_edit",
+            data_schema=self.add_suggested_values_to_schema(self._scene_schema(), suggested),
+            errors=errors,
+            description_placeholders={"name": previous or "New scene"},
+        )
+
+    def _scene_host(self) -> str | None:
+        stored = self.context.get("scene_host")
+        if isinstance(stored, str) and stored:
+            return stored
+        hosts = hosts_of(self.config_entry)
+        if len(hosts) == 1:
+            self.context["scene_host"] = hosts[0]
+            return hosts[0]
+        return None
+
+    def _scene_schema(self) -> probatio.Schema:
+        pattern = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    {"value": PATTERN_SOLID, "label": "Solid color"},
+                    {"value": PATTERN_ALTERNATE, "label": "Alternating colors"},
+                    {"value": PATTERN_FIXTURES, "label": "Only listed fixtures"},
+                ],
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                sort=False,
+            )
+        )
+        brightness = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+        )
+        return probatio.Schema(
+            {
+                probatio.Required("name"): selector.TextSelector(),
+                probatio.Required("pattern"): pattern,
+                probatio.Optional("color"): selector.TextSelector(),
+                probatio.Optional("color_2"): selector.TextSelector(),
+                probatio.Required("brightness"): brightness,
+                probatio.Optional("fixtures"): selector.TextSelector(
+                    selector.TextSelectorConfig(multiline=True)
+                ),
+                probatio.Optional("delete"): selector.BooleanSelector(),
+            }
+        )
+
+    def _scene_suggested(self, scene: dict[str, Any] | None, keys: list[str]) -> dict[str, Any]:
+        if scene is None:
+            return {
+                "name": "",
+                "pattern": PATTERN_SOLID,
+                "color": "255, 255, 255",
+                "color_2": "",
+                "brightness": 100,
+                "fixtures": "",
+                "delete": False,
+            }
+        pattern = str(scene.get("pattern") or PATTERN_FIXTURES)
+        colors = scene.get("colors") or []
+        rgb = scene.get("rgb") or (colors[0] if colors else [255, 255, 255])
+        second = colors[1] if len(colors) > 1 else ""
+        if isinstance(second, list):
+            second = ", ".join(str(channel) for channel in second)
+        return {
+            "name": str(self.context.get("scene_name") or ""),
+            "pattern": pattern,
+            "color": ", ".join(str(channel) for channel in rgb) if pattern != PATTERN_FIXTURES else "",
+            "color_2": second,
+            "brightness": int(scene.get("brightness") or 100),
+            "fixtures": scene_fixture_text(scene, keys) if scene.get("fixtures") or pattern == PATTERN_FIXTURES else "",
+            "delete": False,
+        }
+
+    def _scene_from_input(self, user_input: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        pattern = str(user_input.get("pattern") or PATTERN_SOLID)
+        brightness = int(user_input.get("brightness") or 100)
+        fixtures, line_error = parse_fixture_lines(str(user_input.get("fixtures") or ""))
+        if line_error is not None:
+            return None, "invalid_scene"
+        if pattern == PATTERN_SOLID:
+            color = parse_color_text(str(user_input.get("color") or ""))
+            if color is None and not fixtures:
+                return None, "invalid_scene"
+            scene = solid_scene(color or (255, 255, 255), brightness)
+            scene["fixtures"] = fixtures
+            if color is None:
+                scene["pattern"] = PATTERN_FIXTURES
+                scene.pop("rgb", None)
+            return scene, None
+        if pattern == PATTERN_ALTERNATE:
+            first = parse_color_text(str(user_input.get("color") or ""))
+            second = parse_color_text(str(user_input.get("color_2") or ""))
+            if first is None or second is None:
+                if not fixtures:
+                    return None, "invalid_scene"
+                return {"pattern": PATTERN_FIXTURES, "brightness": brightness, "fixtures": fixtures}, None
+            scene = alternate_scene(first, second, brightness)
+            scene["fixtures"] = fixtures
+            return scene, None
+        if not fixtures:
+            return None, "invalid_scene"
+        return {"pattern": PATTERN_FIXTURES, "brightness": brightness, "fixtures": fixtures}, None
+
     async def _group_action_labels(self) -> dict[str, str]:
         """Labels for the group menu. The text lives in strings.json."""
         from homeassistant.helpers.translation import async_get_translations
@@ -462,7 +692,48 @@ class ColorKineticsOptionsFlow(OptionsFlow):
             CONF_DEFAULT_FADE: clamp_fade_seconds(
                 entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS)
             ),
+            CONF_FOLLOW_ENTRY: follow_of(entry) or "none",
         }
+
+    def _output_schema(self) -> probatio.Schema:
+        """Light-output fields plus the follow-hub list for this moment."""
+        options: list[dict[str, str]] = [{"value": "none", "label": "None"}]
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if entry.entry_id == self.config_entry.entry_id:
+                continue
+            options.append({"value": entry.entry_id, "label": entry.title or entry.entry_id})
+        follow = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=options,
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                sort=False,
+            )
+        )
+        return probatio.Schema(
+            {
+                **OPTIONS_SCHEMA.schema,
+                probatio.Optional(CONF_FOLLOW_ENTRY): follow,
+            }
+        )
+
+    def _follow_value(self, user_input: dict[str, Any]) -> str:
+        if CONF_FOLLOW_ENTRY not in user_input:
+            return follow_of(self.config_entry)
+        return normalize_leader(user_input.get(CONF_FOLLOW_ENTRY))
+
+    def _check_follow(self, user_input: dict[str, Any]) -> None:
+        leader = self._follow_value(user_input)
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        links = {entry.entry_id: follow_of(entry) for entry in entries}
+        links[self.config_entry.entry_id] = leader
+        problem = follow_problem(
+            links,
+            self.config_entry.entry_id,
+            leader,
+            {entry.entry_id for entry in entries},
+        )
+        if problem is not None:
+            raise FollowError(problem)
 
     async def _build_options(self, user_input: dict[str, Any]) -> dict[str, Any]:
         hosts = parse_host_list(str(user_input[CONF_HOSTS]))
@@ -507,4 +778,5 @@ class ColorKineticsOptionsFlow(OptionsFlow):
                 if CONF_DEFAULT_FADE in user_input
                 else entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS)
             ),
+            CONF_FOLLOW_ENTRY: self._follow_value(user_input),
         }

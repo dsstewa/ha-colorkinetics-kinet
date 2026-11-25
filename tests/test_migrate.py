@@ -199,9 +199,14 @@ async def test_v010_upgrade_keeps_the_supply_device_and_entity_ids(hass):
         for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
         if entity.domain == "button"
     ]
-    assert len(buttons) == 1
-    assert buttons[0].entity_id == button.entity_id
-    assert buttons[0].unique_id == f"{SUPPLY_SERIAL}:rescan"
+    rescan = next(entity for entity in buttons if entity.unique_id == f"{SUPPLY_SERIAL}:rescan")
+    assert rescan.entity_id == button.entity_id
+    assert rescan.unique_id == f"{SUPPLY_SERIAL}:rescan"
+    assert {entity.unique_id for entity in buttons} >= {
+        f"{SUPPLY_SERIAL}:rescan",
+        f"{SUPPLY_SERIAL}:stop_effect",
+        f"{SUPPLY_SERIAL}:all_off",
+    }
     assert buttons[0].device_id == supply.id
 
     restored = ent_reg.async_get(light.entity_id)

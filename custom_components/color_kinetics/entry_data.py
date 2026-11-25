@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 
 from .const import (
     CONF_DEFAULT_FADE,
+    CONF_FOLLOW_ENTRY,
     CONF_HOSTS,
     CONF_MANUAL_FIXTURES,
     CONF_OUTPUT_PORT,
@@ -22,6 +23,7 @@ from .const import (
     PROTOCOL_DMXOUT,
     PROTOCOL_PORTOUT,
 )
+from .show import normalize_leader
 
 
 def hosts_of(entry: ConfigEntry) -> list[str]:
@@ -83,10 +85,17 @@ def fade_seconds_of(entry: ConfigEntry) -> float:
     return clamp_fade_seconds(entry.options.get(CONF_DEFAULT_FADE, DEFAULT_FADE_SECONDS))
 
 
-def options_signature(options: dict[str, Any]) -> str:
-    """Identity of every option except the default fade.
+def follow_of(entry: ConfigEntry) -> str:
+    """Entry id this hub follows, or empty when it follows nobody."""
+    return normalize_leader(entry.options.get(CONF_FOLLOW_ENTRY))
 
-    A fade-only change can be applied live. Anything else reloads the entry.
+
+def options_signature(options: dict[str, Any]) -> str:
+    """Identity of every option except values that apply without a reload.
+
+    The default fade and the follow-hub link are applied live. Anything else
+    reloads the entry, which would drop the socket and the frame loop.
     """
-    kept = {key: value for key, value in options.items() if key != CONF_DEFAULT_FADE}
+    live = {CONF_DEFAULT_FADE, CONF_FOLLOW_ENTRY}
+    kept = {key: value for key, value in options.items() if key not in live}
     return json.dumps(kept, sort_keys=True, default=str)
