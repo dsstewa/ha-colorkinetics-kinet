@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 from homeassistant.core import State
@@ -11,9 +12,10 @@ from homeassistant.helpers.storage import Store
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
 from custom_components.color_kinetics.const import CONF_FOLLOW_ENTRY, DOMAIN
-from custom_components.color_kinetics.effects import fixture_channels
-from custom_components.color_kinetics.entry_data import options_signature
-from custom_components.color_kinetics.hub import STORAGE_VERSION
+from custom_components.color_kinetics.effects import cycle_phase, cycle_seconds, fixture_channels
+from custom_components.color_kinetics.show import show_phase
+from custom_components.color_kinetics.entry_data import follow_of, options_signature
+from custom_components.color_kinetics.hub import STORAGE_VERSION, ColorKineticsStore
 from custom_components.color_kinetics.scenes import percent_to_brightness
 from tests.fake_kinet import SUPPLY_HOST, SUPPLY_SERIAL
 from tests.test_light import _entity_id, _entry, _settle, _setup
@@ -297,6 +299,11 @@ async def test_storage_migration_keeps_looks_and_adds_scenes(hass, fake_udp, has
             "scene_hosts": [],
         }
     )
+    migrated = await ColorKineticsStore(hass, STORAGE_VERSION, key).async_load()
+    assert migrated["channels"]["880055BE"] == "010203"
+    assert migrated["looks"]["Evening"]["fixtures"] == {}
+    assert hass_storage[key]["version"] == STORAGE_VERSION
+    assert hass_storage[key]["data"]["channels"]["880055BE"] == "010203"
     assert await hass.config_entries.async_setup(entry.entry_id)
     await _settle(hass, entry)
     hub = entry.runtime_data
@@ -407,6 +414,89 @@ async def test_options_flow_edits_a_scene_and_rejects_a_follow_cycle(hass, fake_
     assert rejected["errors"][CONF_FOLLOW_ENTRY] == "follow_cycle"
 
 
+async def _pause(hub) -> None:
+    """Stop the frame loop so one explicit render owns the buffer."""
+    task = hub._effect_task
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    hub._effect_task = None
+
+
+async def _paint_show(monkeypatch, leader_hub, follower_hub, origin, speed, *, fraction) -> None:
+    """Render at a real show phase and require the copied origin, not phase 0."""
+    import custom_components.color_kinetics.hub as hub_mod
+
+    frozen = float(origin) + cycle_seconds(speed) * fraction
+    with monkeypatch.context() as ctx:
+        ctx.setattr(hub_mod.time, "time", lambda: frozen)
+        if leader_hub is not None and not leader_hub._stopped:
+            await _pause(leader_hub)
+            leader_hub.render_effects(0.0)
+        await _pause(follower_hub)
+        follower_hub.render_effects(0.0)
+    followed = follower_hub.effects.runs[follower_hub.all_fixtures_owner(SECOND_HOST)]
+    follower_keys = follower_hub.target_keys(SECOND_HOST)
+    if leader_hub is not None and not leader_hub._stopped:
+        leader_keys = leader_hub.target_keys(SUPPLY_HOST)
+        total = len(leader_keys) + len(follower_keys)
+        index = len(leader_keys)
+        run = leader_hub.effects.runs[leader_hub.all_fixtures_owner(SUPPLY_HOST)]
+        assert bytes(leader_hub._buffers[SUPPLY_HOST][0:3]) == fixture_channels(
+            run.effect,
+            0,
+            total,
+            fraction,
+            run.rgb,
+            run.brightness,
+            run.intensity,
+            run.palette,
+            run.direction,
+            run.custom,
+        )
+    else:
+        total = len(follower_keys)
+        index = 0
+    painted = bytearray()
+    jumped = bytearray()
+    jumped_phase = cycle_phase(follower_hub.effect_clock(), speed, 0.0)
+    for offset, key_index in enumerate(range(index, index + len(follower_keys))):
+        del key_index
+        painted.extend(
+            fixture_channels(
+                followed.effect,
+                index + offset,
+                total,
+                fraction,
+                followed.rgb,
+                followed.brightness,
+                followed.intensity,
+                followed.palette,
+                followed.direction,
+                followed.custom,
+            )
+        )
+        jumped.extend(
+            fixture_channels(
+                followed.effect,
+                index + offset,
+                total,
+                jumped_phase,
+                followed.rgb,
+                followed.brightness,
+                followed.intensity,
+                followed.palette,
+                followed.direction,
+                followed.custom,
+            )
+        )
+    span = 3 * len(follower_keys)
+    assert bytes(follower_hub._buffers[SECOND_HOST][0:span]) == bytes(painted)
+    assert show_phase(frozen, speed, origin) == pytest.approx(fraction)
+    assert bytes(painted) != bytes(jumped)
+
+
 async def test_follow_hub_syncs_phase_and_clears_when_the_leader_is_removed(
     hass, fake_udp, monkeypatch
 ):
@@ -421,11 +511,12 @@ async def test_follow_hub_syncs_phase_and_clears_when_the_leader_is_removed(
     options[CONF_FOLLOW_ENTRY] = leader.entry_id
     hass.config_entries.async_update_entry(follower, options=options)
     await hass.async_block_till_done()
-    assert follower.runtime_data is follower.runtime_data
+    assert follow_of(follower) == leader.entry_id
     same = options_signature({"protocol": "portout", CONF_FOLLOW_ENTRY: "a"})
     assert same == options_signature({"protocol": "portout", CONF_FOLLOW_ENTRY: "b"})
 
     ids = await _ids(hass)
+    follower_effect = _entity_id(hass, "select", f"{SECOND_SERIAL}:panel_effect")
     await hass.services.async_call(
         "number",
         "set_value",
@@ -441,14 +532,14 @@ async def test_follow_hub_syncs_phase_and_clears_when_the_leader_is_removed(
     await hass.services.async_call(
         "select",
         "select_option",
-        {"entity_id": ids["effect"], "option": "Chase color"},
+        {"entity_id": ids["effect"], "option": "Rainbow cycle"},
         blocking=True,
     )
     await hass.async_block_till_done()
 
     leader_hub = leader.runtime_data
     follower_hub = follower.runtime_data
-    assert follower_hub.panel_state(SECOND_HOST)["effect"] == "Chase color"
+    assert follower_hub.panel_state(SECOND_HOST)["effect"] == "Rainbow cycle"
     assert follower_hub.panel_state(SECOND_HOST)["brightness"] == 80
     follower_speed = _entity_id(
         hass, "number", f"{SECOND_SERIAL}:all_fixtures:effect_speed"
@@ -457,79 +548,69 @@ async def test_follow_hub_syncs_phase_and_clears_when_the_leader_is_removed(
     follower_level = _entity_id(hass, "number", f"{SECOND_SERIAL}:brightness")
     assert float(hass.states.get(follower_level).state) == 80
 
-    for hub in (leader_hub, follower_hub):
-        task = hub._effect_task
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        hub._effect_task = None
+    origin, speed = leader_hub._show_clocks[SUPPLY_HOST]
+    assert follower_hub._show_clocks[SECOND_HOST][0] == origin
+    assert follower_hub._show_clocks[SECOND_HOST][1] == speed
+    await _paint_show(monkeypatch, leader_hub, follower_hub, origin, speed, fraction=0.37)
 
-    moment = 10_000.0
-    leader_hub.show_clock = lambda: moment  # type: ignore[method-assign]
-    follower_hub.show_clock = lambda: moment  # type: ignore[method-assign]
-    leader_hub._show_clocks[SUPPLY_HOST] = (moment, 8.0)
-    follower_hub._show_clocks[SECOND_HOST] = (moment, 8.0)
-    leader_hub.render_effects(0.0)
-    follower_hub.render_effects(0.0)
-
-    leader_keys = leader_hub.target_keys(SUPPLY_HOST)
-    follower_keys = follower_hub.target_keys(SECOND_HOST)
-    total = len(leader_keys) + len(follower_keys)
-    assert len(leader_keys) == 8
-    assert follower_keys == ["AAAA0001", "AAAA0002"]
-    phase = 0.0
-    run = leader_hub.effects.runs[leader_hub.all_fixtures_owner(SUPPLY_HOST)]
-    followed = follower_hub.effects.runs[follower_hub.all_fixtures_owner(SECOND_HOST)]
-    assert bytes(leader_hub._buffers[SUPPLY_HOST][0:3]) == fixture_channels(
-        run.effect,
-        0,
-        total,
-        phase,
-        run.rgb,
-        run.brightness,
-        run.intensity,
-        run.palette,
-        run.direction,
-        run.custom,
+    held = bytes(follower_hub._buffers[SECOND_HOST][0:3])
+    await hass.services.async_call(
+        "button", "press", {"entity_id": ids["stop"]}, blocking=True
     )
-    assert bytes(follower_hub._buffers[SECOND_HOST][0:3]) == fixture_channels(
-        followed.effect,
-        len(leader_keys),
-        total,
-        phase,
-        followed.rgb,
-        followed.brightness,
-        followed.intensity,
-        followed.palette,
-        followed.direction,
-        followed.custom,
-    )
-    local = fixture_channels(
-        followed.effect,
-        0,
-        len(follower_keys),
-        phase,
-        followed.rgb,
-        followed.brightness,
-        followed.intensity,
-        followed.palette,
-        followed.direction,
-        followed.custom,
-    )
-    assert bytes(follower_hub._buffers[SECOND_HOST][0:3]) != local
+    await hass.async_block_till_done()
+    assert not follower_hub.effects.active
+    assert hass.states.get(follower_effect).state == "None"
+    assert bytes(follower_hub._buffers[SECOND_HOST][0:3]) == held
 
     await hass.services.async_call(
         "select",
         "select_option",
-        {"entity_id": ids["scene"], "option": "All Blue"},
+        {"entity_id": ids["effect"], "option": "Rainbow cycle"},
         blocking=True,
     )
     await hass.async_block_till_done()
-    assert bytes(follower_hub._buffers[SECOND_HOST][0:3]) == b"\x00\x00\xff"
+    assert follower_hub.effects.active
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": ids["effect"], "option": "None"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert not follower_hub.effects.active
+    assert hass.states.get(follower_effect).state == "None"
+
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": ids["effect"], "option": "Rainbow cycle"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        "button", "press", {"entity_id": ids["off"]}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert not follower_hub.effects.active
+    assert bytes(follower_hub._buffers[SECOND_HOST][0:3]) == b"\x00\x00\x00"
+    assert bytes(follower_hub._buffers[SECOND_HOST][3:6]) == b"\x00\x00\x00"
+
+    await hass.services.async_call(
+        "select",
+        "select_option",
+        {"entity_id": ids["effect"], "option": "Rainbow cycle"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    origin, speed = follower_hub._show_clocks[SECOND_HOST]
+    await leader_hub.async_stop()
+    assert follower_hub.effects.active
+    assert follower_hub._show_clocks[SECOND_HOST][0] == origin
+    await _paint_show(monkeypatch, None, follower_hub, origin, speed, fraction=0.41)
 
     assert await hass.config_entries.async_remove(leader.entry_id)
     await hass.async_block_till_done()
     assert follower.options.get(CONF_FOLLOW_ENTRY) in ("", None)
+    assert follower_hub.effects.active
+    assert follower_hub._show_clocks[SECOND_HOST][0] == origin
+    await _paint_show(monkeypatch, None, follower_hub, origin, speed, fraction=0.53)

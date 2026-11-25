@@ -23,6 +23,7 @@ TARGET_ALL_LABEL = "All fixtures"
 MODE_IDLE = "idle"
 MODE_EFFECT = "effect"
 MODE_SCENE = "scene"
+MODE_OFF = "off"
 
 PATTERN_SOLID = "solid"
 PATTERN_ALTERNATE = "alternate"
@@ -343,6 +344,7 @@ def default_panel() -> dict[str, Any]:
         "mode": MODE_IDLE,
         "show_origin": None,
         "show_speed": None,
+        "show_adopted": False,
     }
 
 
@@ -358,13 +360,14 @@ def normalize_panel(raw: Any) -> dict[str, Any]:
     panel["target"] = str(target).strip() if isinstance(target, str) and target.strip() else TARGET_ALL
     panel["brightness"] = clamp_percent(raw.get("brightness"), fallback=100)
     mode = str(raw.get("mode") or MODE_IDLE)
-    if mode not in (MODE_IDLE, MODE_EFFECT, MODE_SCENE):
+    if mode not in (MODE_IDLE, MODE_EFFECT, MODE_SCENE, MODE_OFF):
         mode = MODE_IDLE
     if mode == MODE_EFFECT and panel["effect"] == EFFECT_NONE:
         mode = MODE_IDLE
     if mode == MODE_SCENE and not panel["scene"]:
         mode = MODE_IDLE
     panel["mode"] = mode
+    panel["show_adopted"] = bool(raw.get("show_adopted"))
     try:
         origin = float(raw["show_origin"]) if raw.get("show_origin") is not None else None
     except (TypeError, ValueError):

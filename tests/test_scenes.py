@@ -104,6 +104,7 @@ def test_panel_and_effect_names_reject_unknown_values():
     assert panel["brightness"] == 40
     assert panel["show_origin"] == 12.5
     assert normalize_panel({"mode": "effect"})["mode"] == "idle"
+    assert normalize_panel({"mode": "off", "effect": "None"})["mode"] == "off"
     assert normalize_panel({"mode": "scene"})["mode"] == "idle"
     assert normalize_panel({"mode": "nope"})["mode"] == "idle"
     assert normalize_panel({"show_origin": "nope", "show_speed": "nope"})["show_origin"] is None

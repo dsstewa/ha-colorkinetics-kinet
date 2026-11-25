@@ -90,6 +90,7 @@ from .scenes import (
     EFFECT_NONE,
     MODE_EFFECT,
     MODE_IDLE,
+    MODE_OFF,
     MODE_SCENE,
     TARGET_ALL,
     TARGET_ALL_LABEL,
@@ -283,8 +284,12 @@ class ColorKineticsHub:
         self._restore_seeds: dict[str, dict[str, Any]] = {}
         self._panel_listeners: list[Listener] = []
         self._show_clocks: dict[str, tuple[float, float]] = {}
-        self._syncing = False
+        self._adopted_clocks: set[str] = set()
+        self._sync_depth = 0
         self._applying = False
+        self._publish_tasks: set[asyncio.Task[Any]] = set()
+        self._task_serial = 0
+        self._followed_entry = follow_of(entry)
         self._command_epoch: dict[str, int] = {}
         self._epoch = 0
         self._deferred: list[_DeferredEffects] = []
@@ -490,9 +495,22 @@ class ColorKineticsHub:
         signature = options_signature(dict(self.entry.options))
         if signature != self._options_signature:
             return False
+        previous = self._followed_entry
         self.set_default_fade(fade_seconds_of(self.entry))
-        self.note_follow_option()
+        current = follow_of(self.entry)
+        if current != previous:
+            self._followed_entry = current
+            self.note_follow_option()
         return True
+
+    @property
+    def _syncing(self) -> bool:
+        """True while one or more leader mirrors are being applied.
+
+        A counter, not a bool: the first accept to finish must not clear the
+        flag while another accept is still inside ``async_turn_on``.
+        """
+        return self._sync_depth > 0
 
     def effect_clock(self) -> float:
         """Monotonic time base for effect frames and fades."""
@@ -1075,6 +1093,7 @@ class ColorKineticsHub:
         self._drop_stale_registry_entries()
         self._default_fade = fade_seconds_of(self.entry)
         self._options_signature = options_signature(dict(self.entry.options))
+        self._followed_entry = follow_of(self.entry)
         self.pump.start()
 
     async def async_stop(self) -> None:
@@ -1082,6 +1101,13 @@ class ColorKineticsHub:
         if self._stopped:
             return
         self._stopped = True
+        pending = list(self._publish_tasks)
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._publish_tasks.clear()
         self._clear_issues()
         self.effects.runs.clear()
         self.effects.owners.clear()
@@ -1497,6 +1523,8 @@ class ColorKineticsHub:
                         float(panel["show_origin"]),
                         float(panel["show_speed"]),
                     )
+                if panel.get("show_adopted"):
+                    self._adopted_clocks.add(str(host))
         self._ensure_default_scenes()
         for host in self.hosts:
             self._panel.setdefault(host, default_panel())
@@ -1785,7 +1813,7 @@ class ColorKineticsHub:
         if self._target_light(host) is None:
             return False
         state = self.panel_state(host)
-        if state["mode"] == MODE_IDLE:
+        if state["mode"] in (MODE_IDLE, MODE_OFF):
             return True
         if self.target_keys(host):
             return True
@@ -1815,11 +1843,18 @@ class ColorKineticsHub:
 
     async def _apply_mode(self, host: str, *, restart_clock: bool) -> None:
         state = self.panel_state(host)
+        if self._stopped:
+            return
         if state["mode"] == MODE_EFFECT and state["effect"] != EFFECT_NONE:
             await self._run_effect(host, str(state["effect"]), restart_clock=restart_clock)
             return
         if state["mode"] == MODE_SCENE and state.get("scene"):
             await self._run_scene(host, str(state["scene"]))
+            return
+        if state["mode"] == MODE_OFF:
+            await self._apply_all_off(host)
+            return
+        self._stop_target_effect(host)
 
     async def _run_effect(self, host: str, effect: str, *, restart_clock: bool) -> None:
         light = self._target_light(host)
@@ -1827,6 +1862,7 @@ class ColorKineticsHub:
             return
         speed = self.effect_speed(light._owner_id)
         if restart_clock or host not in self._show_clocks:
+            self._adopted_clocks.discard(host)
             self._show_clocks[host] = (self.show_clock(), float(speed))
             self._store_clock(host)
         level = percent_to_brightness(self.panel_state(host)["brightness"])
@@ -1909,6 +1945,7 @@ class ColorKineticsHub:
         else:
             state["show_origin"] = float(clock[0])
             state["show_speed"] = float(clock[1])
+        state["show_adopted"] = host in self._adopted_clocks
         self._panel[host] = state
 
     def _retarget_show_clock(self, host: str, new_speed: float) -> None:
@@ -1925,12 +1962,15 @@ class ColorKineticsHub:
         self._store_clock(host)
 
     async def _commit_panel(self, host: str) -> None:
+        if self._stopped:
+            return
         self._panel_touched.add(host)
         self._panel_applied.add(host)
         self.notify_panel()
         await self._save()
-        if not self._syncing:
-            await self.async_publish_host(host)
+        if self._stopped or self._syncing:
+            return
+        await self.async_publish_host(host)
 
     async def async_select_effect(self, host: str, effect: str) -> None:
         """Run ``effect`` on the panel target. None leaves the current colors."""
@@ -2023,16 +2063,23 @@ class ColorKineticsHub:
             self._update_panel(host, effect=EFFECT_NONE)
         await self._commit_panel(host)
 
-    async def async_all_off(self, host: str) -> None:
-        """Turn the panel target off. The fade is the supply's default fade."""
-        self._update_panel(host, effect=EFFECT_NONE, scene=None, mode=MODE_IDLE)
+    async def _apply_all_off(self, host: str) -> None:
+        """Turn the target off. Callers publish the off mode themselves."""
+        if self._stopped:
+            return
         light = self._target_light(host)
+        self.effects.stop(light._owner_id if light is not None else self._panel_owner(host))
         self._applying = True
         try:
-            if light is not None:
+            if light is not None and not self._stopped:
                 await light.async_turn_off()
         finally:
             self._applying = False
+
+    async def async_all_off(self, host: str) -> None:
+        """Turn the panel target off. The fade is the supply's default fade."""
+        self._update_panel(host, effect=EFFECT_NONE, scene=None, mode=MODE_OFF)
+        await self._apply_all_off(host)
         await self._commit_panel(host)
 
     async def async_upsert_scene(
@@ -2126,28 +2173,41 @@ class ColorKineticsHub:
         return row
 
     def _effect_syncs(self) -> dict[str, tuple[Any, float]]:
-        """Shared phase and combined index for each panel effect in a show."""
+        """Shared phase and combined index for each panel effect in a show.
+
+        A follower that copied the leader's clock keeps that phase when it is
+        the only hub left running. A solo effect that never followed anyone
+        still uses ``EffectRun.phase_at``.
+        """
         syncs: dict[str, tuple[Any, float]] = {}
         for host in self.hosts:
             if self.panel_state(host).get("mode") != MODE_EFFECT:
                 continue
             row = self._show_row(host)
-            if len(row) < 2:
+            if len(row) >= 2:
+                root_hub, root_host = row[0]
+                clock = root_hub._show_clocks.get(root_host)
+                if clock is None:
+                    continue
+                origin, speed = clock
+                phase = show_phase(root_hub.show_clock(), speed, origin)
+                local: dict[str, int] = {}
+                cursor = 0
+                for hub, member_host in row:
+                    for key in hub.target_keys(member_host):
+                        if hub is self:
+                            local[key] = cursor
+                        cursor += 1
+                total = cursor
+            elif host in self._adopted_clocks and host in self._show_clocks:
+                origin, speed = self._show_clocks[host]
+                phase = show_phase(self.show_clock(), speed, origin)
+                local = {
+                    key: index for index, key in enumerate(self.target_keys(host))
+                }
+                total = len(local)
+            else:
                 continue
-            root_hub, root_host = row[0]
-            clock = root_hub._show_clocks.get(root_host)
-            if clock is None:
-                continue
-            origin, speed = clock
-            phase = show_phase(root_hub.show_clock(), speed, origin)
-            local: dict[str, int] = {}
-            cursor = 0
-            for hub, member_host in row:
-                for key in hub.target_keys(member_host):
-                    if hub is self:
-                        local[key] = cursor
-                    cursor += 1
-            total = cursor
             if total <= 0:
                 continue
 
@@ -2160,18 +2220,30 @@ class ColorKineticsHub:
             syncs[self._panel_owner(host)] = (_placement, phase)
         return syncs
 
+    def _spawn(self, coro: Any, name: str) -> None:
+        """Track a publish task so unload cancels it before it can save."""
+        if self._stopped:
+            coro.close()
+            return
+        self._task_serial += 1
+        task = self.entry.async_create_background_task(
+            self.hass, coro, f"{name} {self._task_serial}"
+        )
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
+
     def note_follow_option(self) -> None:
         """A follow-hub change was stored. Pull the leader without reloading."""
         if self._stopped:
             return
-        self.hass.async_create_task(self.async_pull_leader())
+        self._spawn(self.async_pull_leader(), "color_kinetics follow")
 
     def _schedule_publish(self, host: str) -> None:
         if self._syncing or self._stopped or self._applying:
             return
         if not self._direct_follower_hubs():
             return
-        self.hass.async_create_task(self.async_publish_host(host))
+        self._spawn(self.async_publish_host(host), "color_kinetics publish")
 
     def _apply_speed_entity(self, owner: str, speed: float) -> None:
         slider = self.speed_entities.get(owner)
@@ -2214,7 +2286,7 @@ class ColorKineticsHub:
 
     async def async_accept(self, leader: Any, leader_host: str, host: str) -> None:
         """Mirror one supply of ``leader`` onto ``host``."""
-        if host not in self.hosts or leader is None:
+        if self._stopped or host not in self.hosts or leader is None:
             return
         state = leader.panel_state(leader_host)
         if state.get("mode") == MODE_SCENE:
@@ -2227,24 +2299,33 @@ class ColorKineticsHub:
             else:
                 state = dict(state)
                 state["scene"] = mirrored
-        self._panel[host] = normalize_panel(state)
-        self._panel_touched.add(host)
-        self._panel_applied.add(host)
-        speed = leader.effect_speed(leader._panel_owner(leader_host))
-        self._syncing = True
+        self._sync_depth += 1
         try:
+            if self._stopped:
+                return
+            self._panel[host] = normalize_panel(state)
+            self._panel_touched.add(host)
+            self._panel_applied.add(host)
+            speed = leader.effect_speed(leader._panel_owner(leader_host))
             self._apply_speed_entity(self._panel_owner(host), speed)
             if leader_host in leader._show_clocks:
-                self._show_clocks[host] = leader._show_clocks[leader_host]
+                self._show_clocks[host] = tuple(leader._show_clocks[leader_host])
+                self._adopted_clocks.add(host)
                 self._store_clock(host)
+            elif state.get("mode") != MODE_EFFECT:
+                self._adopted_clocks.discard(host)
             await self._apply_mode(host, restart_clock=False)
+            if self._stopped:
+                return
             if (
                 state.get("mode") == MODE_SCENE
                 and not self._scene_brightness_matches(host)
             ):
                 await self._apply_brightness_level(host, int(self.panel_state(host)["brightness"]))
         finally:
-            self._syncing = False
+            self._sync_depth = max(0, self._sync_depth - 1)
+        if self._stopped:
+            return
         self.notify_panel()
         await self._save()
 

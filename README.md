@@ -166,7 +166,9 @@ On that page, in order:
 
 The same device page after you open the Data Enabler: the Effect selector on Halloween, the Scene selector on None, Target on All fixtures, Brightness at 100%, the four existing effect controls, and the Stop effect and All off buttons under All fixtures. Fixture lights for that supply are listed on the same device.
 
-Open **Configure** and choose **Scenes** to rename a scene or set per-fixture colors (`serial, r, g, b, brightness`). **Follow hub** is on the Light output page. None, or another Color Kinetics entry. A follower copies the leader's effect, scene, speed, and brightness. The chase is one show: phase comes from a shared clock, and the fixture order is the leader's fixtures first, then the follower's, so the pattern walks across the hubs without drifting. A link that loops back is rejected. Deleting an entry clears anyone who was following it.
+Open **Configure** and choose **Scenes** to rename a scene or set per-fixture colors (`serial, r, g, b, brightness`). **Follow hub** is on the Light output page. None, or another Color Kinetics entry. A follower copies the leader's effect, scene, speed, and brightness. Stop effect and Effect None stop the follower too, and leave its colors. All off turns the follower off. The chase is one show: phase comes from a shared clock, and the fixture order is the leader's fixtures first, then the follower's, so the pattern walks across the hubs without drifting. If the leader reloads or is removed, the follower keeps that phase from the clock it already copied. A link that loops back is rejected. Deleting an entry clears anyone who was following it.
+
+Follow hub does not copy palette, intensity, or direction, and it does not copy the target. Those stay on each Data Enabler. A group id belongs to one entry, so a follower that is handed the leader's group uses All fixtures instead.
 
 The panel is the source of truth. The entities only show it. The selected effect and scene come back after a restart. The light's own effect list, fade, and color temperature are unchanged.
 
