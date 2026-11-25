@@ -150,6 +150,53 @@ Setting `color_temp_kelvin` reports `color_mode: color_temp` and that kelvin. Se
 
 Home Assistant draws its own swatch for `color_temp` from the kelvin. That swatch can differ by a few steps from the DMX bytes, which follow the formula above.
 
+## Control panel
+
+Each Data Enabler has the controls on its own device page, so a show does not need a separate script. The device is the one that already owns **All fixtures**.
+
+On that page, in order:
+
+- **Effect** — None, or any effect the integration already runs (Solid, Breathe, Rainbow, Colorloop, Alternate, Christmas, Halloween, and the rest). The choice runs on the target below. None stops the effect and leaves the colors that are already on.
+- **Scene** — a saved look. Applying it stops any effect. The built-ins are Halloween Purple (every fixture 238, 0, 255), Christmas Red Green (red, then green, along fixture order), All Blue (0, 0, 255), Camp (warm white 255, 180, 80), and All Orange (255, 80, 0).
+- **Target** — All fixtures, or a group you added (Pine, Oak, Tree Run, and so on). The default is All fixtures.
+- **Brightness** — 0 to 100%. This is the level the panel and Follow hub use.
+- **Effect speed**, **Effect intensity**, **Effect palette**, and **Effect direction** — the sliders and selectors that were already on this device.
+- **Stop effect** — stops the animation and leaves the current colors.
+- **All off** — turns the target off, using the default fade.
+
+The same device page after you open the Data Enabler: the Effect selector on Halloween, the Scene selector on None, Target on All fixtures, Brightness at 100%, the four existing effect controls, and the Stop effect and All off buttons under All fixtures. Fixture lights for that supply are listed on the same device.
+
+Open **Configure** and choose **Scenes** to rename a scene or set per-fixture colors (`serial, r, g, b, brightness`). **Follow hub** is on the Light output page. None, or another Color Kinetics entry. A follower copies the leader's effect, scene, speed, and brightness. Stop effect and Effect None stop the follower too, and leave its colors. All off turns the follower off. The chase is one show: phase comes from a shared clock, and the fixture order is the leader's fixtures first, then the follower's, so the pattern walks across the hubs without drifting. If the leader reloads or is removed, the follower keeps that phase from the clock it already copied. A link that loops back is rejected. Deleting an entry clears anyone who was following it.
+
+Follow hub does not copy palette, intensity, or direction, and it does not copy the target. Those stay on each Data Enabler. A group id belongs to one entry, so a follower that is handed the leader's group uses All fixtures instead.
+
+The panel is the source of truth. The entities only show it. The selected effect and scene come back after a restart. The light's own effect list, fade, and color temperature are unchanged.
+
+```yaml
+type: grid
+columns: 2
+square: false
+cards:
+  - type: tile
+    entity: select.data_enabler_pro_172_16_10_41_effect
+    name: Effect
+  - type: tile
+    entity: select.data_enabler_pro_172_16_10_41_scene
+    name: Scene
+  - type: tile
+    entity: select.data_enabler_pro_172_16_10_41_target
+    name: Target
+  - type: tile
+    entity: number.data_enabler_pro_172_16_10_41_brightness
+    name: Brightness
+  - type: tile
+    entity: button.data_enabler_pro_172_16_10_41_stop_effect
+    name: Stop effect
+  - type: tile
+    entity: button.data_enabler_pro_172_16_10_41_all_off
+    name: All off
+```
+
 ## Saved looks
 
 The **Look** selector on the Data Enabler recalls a saved look. Its options are the look names. The last look you saved or recalled stays selected across a restart.
@@ -197,6 +244,7 @@ Open the integration's **Configure** dialog:
 | Output port | 1 | This Data Enabler Pro has a single output, port 1. Ignored for DMXOUT. |
 | Manual fixtures | empty | Used when discovery misses a fixture. |
 | Default fade (seconds) | 1.5 | Fade when a light command omits `transition`. 0 snaps. Also the Default fade number on the Data Enabler. |
+| Follow hub | None | Another Color Kinetics entry to mirror. None runs this Data Enabler on its own. A loop is rejected. |
 
 Manual line format, DMX start **1-based** (the number QuickPlay shows):
 

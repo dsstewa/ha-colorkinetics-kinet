@@ -182,7 +182,12 @@ async def test_store_migration_adds_looks_and_keeps_channels(hass, hass_storage)
     assert loaded["looks"] == {}
     assert loaded["channels"]["880055BE"] == "00ff00"
     assert hass_storage[key]["version"] == STORAGE_VERSION
-    assert await store._async_migrate_func(1, 1, None) == {"looks": {}}
+    assert await store._async_migrate_func(1, 1, None) == {
+        "looks": {},
+        "scenes": {},
+        "panel": {},
+        "scene_hosts": [],
+    }
     assert (await store._async_migrate_func(1, 1, {"looks": []}))["looks"] == {}
     kept = await store._async_migrate_func(2, 1, {"looks": {"Porch": {}}, "channels": {}})
     assert kept["looks"] == {"Porch": {}}

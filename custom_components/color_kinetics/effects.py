@@ -1438,14 +1438,34 @@ class EffectEngine:
         now: float,
         dmx_of,
         available,
+        *,
+        syncs: dict | None = None,
     ) -> dict[str, list[tuple[int, bytes]]]:
-        """Channel writes grouped by host. Unavailable fixtures are skipped."""
+        """Channel writes grouped by host. Unavailable fixtures are skipped.
+
+        ``syncs`` maps an owner to ``(placement, phase)``. ``placement(key)``
+        returns ``(index, count)`` in a combined show, and ``phase`` is the
+        shared cycle position. Owners that are absent keep the local index
+        and ``phase_at``, which is the single-hub behavior.
+        """
         grouped: dict[str, list[tuple[int, bytes]]] = {}
-        for run in self.runs.values():
+        shared = syncs or {}
+        for owner, run in self.runs.items():
             drawn = [key for key in run.order if available(key)]
-            phase = run.phase_at(now)
-            count = len(drawn)
-            for index, key in enumerate(drawn):
+            sync = shared.get(owner)
+            if sync is None:
+                run_phase = run.phase_at(now)
+                slots = [(index, len(drawn), key) for index, key in enumerate(drawn)]
+            else:
+                placement, run_phase = sync
+                slots = []
+                for key in drawn:
+                    found = placement(key)
+                    if found is None:
+                        continue
+                    index, count = found
+                    slots.append((int(index), int(count), key))
+            for index, count, key in slots:
                 located = dmx_of(key)
                 if located is None:
                     continue
@@ -1454,7 +1474,7 @@ class EffectEngine:
                     run.effect,
                     index,
                     count,
-                    phase,
+                    run_phase,
                     run.rgb,
                     run.brightness,
                     run.intensity,

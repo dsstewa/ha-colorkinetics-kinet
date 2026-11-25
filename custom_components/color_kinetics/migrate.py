@@ -21,8 +21,8 @@ ENTRY_VERSION = 2
 ENTRY_MINOR_VERSION = 1
 # Entry migration runs before the hub opens the cache, while the file is still
 # the 0.1.x store (major version 1). The hub then migrates that file to
-# STORAGE_VERSION, which adds looks. This Store stays on version 1 so it can
-# read the file it is rewriting.
+# STORAGE_VERSION. Version 2 adds looks. Version 3 adds scenes and the panel.
+# This Store stays on version 1 so it can read the file it is rewriting.
 _STORAGE_VERSION = 1
 
 

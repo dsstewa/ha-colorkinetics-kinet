@@ -27,11 +27,12 @@
     "step": {
       "init": {
         "title": "Color Kinetics options",
-        "description": "Change the light output, the order fixtures chase in, or named groups.",
+        "description": "Change the light output, the order fixtures chase in, named groups, or the scenes on the control panel.",
         "menu_options": {
           "output": "Light output",
           "fixture_order": "Fixture order",
-          "groups": "Groups"
+          "groups": "Groups",
+          "scenes": "Scenes"
         }
       },
       "output": {
@@ -43,7 +44,8 @@
           "portout_version": "PORTOUT header version",
           "output_port": "Output port",
           "manual_fixtures": "Manual fixtures",
-          "default_fade": "Default fade (seconds)"
+          "default_fade": "Default fade (seconds)",
+          "follow_entry": "Follow hub"
         },
         "data_description": {
           "hosts": "One IPv4 address per line. A new address is polled before it is saved. Removing an address stops sending to that supply.",
@@ -51,7 +53,35 @@
           "portout_version": "1 writes 01 00 (OLA). 2 writes 02 00 (Haukcode). Ignored for DMXOUT.",
           "output_port": "Physical output on the Data Enabler, 1 to 16. This supply uses port 1. Ignored for DMXOUT.",
           "manual_fixtures": "One fixture per line if discovery misses it: serial_or_label, dmx_start[, label]. DMX start is 1-based, as QuickPlay shows it. An 8-digit hex token is a serial. With more than one supply, start the line with the supply IP. Example: 880055BE, 1, Oak left",
-          "default_fade": "Seconds to fade when a light command does not set transition. 0 snaps on and off. 1.5 is the default."
+          "default_fade": "Seconds to fade when a light command does not set transition. 0 snaps on and off. 1.5 is the default.",
+          "follow_entry": "None, or another Color Kinetics entry. This hub copies that entry's effect, scene, speed, and brightness. Chases use one clock and run across both fixture orders. A loop is rejected."
+        }
+      },
+      "scenes": {
+        "title": "Scenes",
+        "description": "Scenes for {host}. A scene is a name and a color for each fixture. Choosing it on the Data Enabler stops any effect.",
+        "data": {
+          "scene_action": "Scene"
+        }
+      },
+      "scene_host": {
+        "title": "Which Data Enabler",
+        "description": "Scenes are stored on each Data Enabler.",
+        "data": {
+          "scene_host": "Data Enabler"
+        }
+      },
+      "scene_edit": {
+        "title": "Edit {name}",
+        "description": "Solid and alternating colors apply to every fixture in the panel target, in fixture order. Alternating starts with the first color. A fixture line overrides that fixture: serial, r, g, b, brightness. Brightness is 0 to 100.",
+        "data": {
+          "name": "Name",
+          "pattern": "Pattern",
+          "color": "Color (r, g, b)",
+          "color_2": "Second color (r, g, b)",
+          "brightness": "Brightness (%)",
+          "fixtures": "Per-fixture colors",
+          "delete": "Delete this scene"
         }
       },
       "fixture_order": {
@@ -86,13 +116,23 @@
       "invalid_manual": "{detail}",
       "invalid_group": "Enter a name for the group.",
       "duplicate_group": "A group with this name already exists.",
-      "group_members": "Choose at least one fixture."
+      "group_members": "Choose at least one fixture.",
+      "follow_cycle": "That follow link would loop back to this Data Enabler.",
+      "follow_missing": "That Data Enabler is no longer configured.",
+      "invalid_scene": "Enter a name and colors. Use r, g, b from 0 to 255, and brightness from 0 to 100.",
+      "duplicate_scene": "A scene with this name already exists."
     }
   },
   "entity": {
     "button": {
       "rescan": {
         "name": "Rescan fixtures"
+      },
+      "stop_effect": {
+        "name": "Stop effect"
+      },
+      "all_off": {
+        "name": "All off"
       }
     },
     "light": {
@@ -144,11 +184,23 @@
       },
       "default_fade": {
         "name": "Default fade (seconds)"
+      },
+      "brightness": {
+        "name": "Brightness"
       }
     },
     "select": {
       "look": {
         "name": "Look"
+      },
+      "panel_effect": {
+        "name": "Effect"
+      },
+      "panel_scene": {
+        "name": "Scene"
+      },
+      "panel_target": {
+        "name": "Target"
       },
       "effect_palette": {
         "name": "Effect palette",

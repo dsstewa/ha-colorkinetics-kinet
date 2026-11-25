@@ -16,6 +16,7 @@ CONF_MANUAL_FIXTURES: Final = "manual_fixtures"
 CONF_FIXTURE_ORDER: Final = "fixture_order"
 CONF_GROUPS: Final = "groups"
 CONF_DEFAULT_FADE: Final = "default_fade"
+CONF_FOLLOW_ENTRY: Final = "follow_entry"
 
 PROTOCOL_PORTOUT: Final = "portout"
 PROTOCOL_DMXOUT: Final = "dmxout"

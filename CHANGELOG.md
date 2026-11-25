@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Control panel on each Data Enabler, next to All fixtures. Effect runs the existing effects (or None, which stops and leaves the colors). Scene applies a saved look. Target is All fixtures or a group such as Pine, Oak, or Tree Run. Brightness is 0–100%. Stop effect and All off sit beside the existing speed, intensity, palette, and direction controls.
+- Scenes are stored per Data Enabler and edited in the options flow (name, pattern, and per-fixture RGB and brightness). The built-ins are Halloween Purple (238, 0, 255), Christmas Red Green (red then green along fixture order), All Blue (0, 0, 255), Camp (warm white 255, 180, 80), and All Orange (255, 80, 0). Applying a scene stops any effect. The selection is restored after a restart.
+- Follow hub, in the options flow, mirrors another KiNet entry's effect, scene, speed, and brightness. A chase uses one shared clock and the combined fixture order, leader first, so it crosses hubs without drifting. Stop effect and Effect None stop the follower too. All off turns it off. If the leader reloads or is removed, the follower keeps the phase from the clock it already copied. A follow link that loops is rejected. Removing an entry clears hubs that followed it. Palette, intensity, direction, and the target stay on each hub.
+
 ## 0.2.1
 
 - Lights fade on and off by default. Default fade (seconds) is a configuration number on the Data Enabler and a field in the options flow, from 0 to 10, starting at 1.5. 0 snaps. An explicit `transition` overrides it. The fade runs in the existing frame loop, one frame per Data Enabler per tick, on a gamma 2.2 curve. A command during a fade continues from the current level. The light reports off when a turn-off fade finishes.

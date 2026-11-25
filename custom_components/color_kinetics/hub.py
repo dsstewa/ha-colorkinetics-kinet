@@ -39,6 +39,7 @@ from .const import (
 from .entry_data import (
     clamp_fade_seconds,
     fade_seconds_of,
+    follow_of,
     hosts_of,
     manual_text_of,
     options_signature,
@@ -64,6 +65,7 @@ from .properties import (
     COMMON_FIXTURE_PROPS,
     GEN4_FIXTURE_PROPS,
     SUFFIX_ALL_FIXTURES,
+    SUFFIX_ALL_OFF,
     SUFFIX_DMX,
     SUFFIX_DEFAULT_FADE,
     SUFFIX_EFFECT_DIRECTION,
@@ -71,14 +73,39 @@ from .properties import (
     SUFFIX_EFFECT_PALETTE,
     SUFFIX_EFFECT_SPEED,
     SUFFIX_LOOK,
+    SUFFIX_PANEL_BRIGHTNESS,
+    SUFFIX_PANEL_EFFECT,
+    SUFFIX_PANEL_SCENE,
+    SUFFIX_PANEL_TARGET,
     SUFFIX_POWER_TIME,
     SUFFIX_RAW,
     SUFFIX_SCALE,
     SUFFIX_STARTUP,
+    SUFFIX_STOP_EFFECT,
     SUPPLY_PROPS,
     TYPE_BLAST,
     model_name,
 )
+from .scenes import (
+    EFFECT_NONE,
+    MODE_EFFECT,
+    MODE_IDLE,
+    MODE_OFF,
+    MODE_SCENE,
+    TARGET_ALL,
+    TARGET_ALL_LABEL,
+    clamp_percent,
+    default_panel,
+    default_scenes,
+    find_scene_name,
+    normalize_effect_option,
+    normalize_panel,
+    normalize_scene,
+    normalize_scene_map,
+    percent_to_brightness,
+    resolve_scene,
+)
+from .show import chain_members, retarget_origin, root_of, show_phase
 from .protocol import (
     DMX_SLOTS,
     PORTOUT_MIN_DATA,
@@ -95,13 +122,17 @@ from .pump import FramePump
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 
 Listener = Any
 
 
 class ColorKineticsStore(Store[dict[str, Any]]):
-    """Fixture cache. Version 2 adds named looks beside the saved channels."""
+    """Fixture cache.
+
+    Version 2 adds named looks beside the saved channels. Version 3 adds
+    per-hub scenes and the control-panel selection.
+    """
 
     async def _async_migrate_func(
         self,
@@ -109,13 +140,22 @@ class ColorKineticsStore(Store[dict[str, Any]]):
         old_minor_version: int,
         old_data: dict[str, Any],
     ) -> dict[str, Any]:
-        """Keep a 0.1.1 cache and add an empty look map."""
+        """Keep an older cache and add the maps it does not have yet."""
         if isinstance(old_data, dict):
             data = dict(old_data)
         else:
             data = {}
-        if old_major_version < STORAGE_VERSION and not isinstance(data.get("looks"), dict):
+        if old_major_version < 2 and not isinstance(data.get("looks"), dict):
             data["looks"] = {}
+        if old_major_version < STORAGE_VERSION:
+            if not isinstance(data.get("looks"), dict):
+                data["looks"] = {}
+            if not isinstance(data.get("scenes"), dict):
+                data["scenes"] = {}
+            if not isinstance(data.get("panel"), dict):
+                data["panel"] = {}
+            if not isinstance(data.get("scene_hosts"), list):
+                data["scene_hosts"] = []
         return data
 
 
@@ -235,6 +275,21 @@ class ColorKineticsHub:
         self._looks: dict[str, dict[str, Any]] = {}
         self.selected_look: str | None = None
         self._look_listeners: list[Listener] = []
+        self._scenes: dict[str, dict[str, dict[str, Any]]] = {}
+        self._scene_hosts: list[str] = []
+        self._panel: dict[str, dict[str, Any]] = {}
+        self._panel_explicit: set[str] = set()
+        self._panel_touched: set[str] = set()
+        self._panel_applied: set[str] = set()
+        self._restore_seeds: dict[str, dict[str, Any]] = {}
+        self._panel_listeners: list[Listener] = []
+        self._show_clocks: dict[str, tuple[float, float]] = {}
+        self._adopted_clocks: set[str] = set()
+        self._sync_depth = 0
+        self._applying = False
+        self._publish_tasks: set[asyncio.Task[Any]] = set()
+        self._task_serial = 0
+        self._followed_entry = follow_of(entry)
         self._command_epoch: dict[str, int] = {}
         self._epoch = 0
         self._deferred: list[_DeferredEffects] = []
@@ -361,11 +416,22 @@ class ColorKineticsHub:
         return float(self._speeds.get(owner, DEFAULT_EFFECT_SPEED))
 
     def set_effect_speed(self, owner: str, speed: float) -> None:
-        """Update the speed. A running effect uses it on the next frame."""
+        """Update the speed. A running effect uses it on the next frame.
+
+        The panel target's speed is also the show speed. The leader retargets
+        the shared origin so the phase does not jump, then followers copy it.
+        """
         self._speeds[owner] = float(speed)
         run = self.effects.runs.get(owner)
         if run is not None:
             run.speed = float(speed)
+        host = self._host_for_panel_owner(owner)
+        if host is None or self._syncing or self._applying:
+            return
+        if self.panel_state(host).get("mode") != MODE_EFFECT and host not in self._show_clocks:
+            return
+        self._retarget_show_clock(host, float(speed))
+        self._schedule_publish(host)
 
     def effect_intensity(self, owner: str) -> float:
         """Intensity slider for an effect owner. Missing sliders use 5."""
@@ -423,18 +489,41 @@ class ColorKineticsHub:
             entity.apply_fade(self._default_fade)
 
     def absorb_fade_option(self) -> bool:
-        """Apply a fade-only options write without reloading. False reloads."""
+        """Apply a fade or follow-hub change without reloading. False reloads."""
         if self._stopped:
             return False
         signature = options_signature(dict(self.entry.options))
         if signature != self._options_signature:
             return False
+        previous = self._followed_entry
         self.set_default_fade(fade_seconds_of(self.entry))
+        current = follow_of(self.entry)
+        if current != previous:
+            self._followed_entry = current
+            self.note_follow_option()
         return True
+
+    @property
+    def _syncing(self) -> bool:
+        """True while one or more leader mirrors are being applied.
+
+        A counter, not a bool: the first accept to finish must not clear the
+        flag while another accept is still inside ``async_turn_on``.
+        """
+        return self._sync_depth > 0
 
     def effect_clock(self) -> float:
         """Monotonic time base for effect frames and fades."""
         return time.monotonic()
+
+    def show_clock(self) -> float:
+        """Wall time for a multi-hub show.
+
+        Monotonic time starts over when Home Assistant restarts, so a shared
+        show uses the wall clock. Every hub passes the same origin and reads
+        the same formula, which keeps the phase together.
+        """
+        return time.time()
 
     def _frame_delay(self) -> float:
         """Seconds between animation frames. The pump still caps sends at this rate."""
@@ -585,7 +674,9 @@ class ColorKineticsHub:
             fixture = self.get_fixture(key)
             return bool(fixture and self.is_available(fixture))
 
-        for host, regions in self.effects.frames(now, dmx_of, available).items():
+        for host, regions in self.effects.frames(
+            now, dmx_of, available, syncs=self._effect_syncs()
+        ).items():
             wrote = False
             for start, payload in regions:
                 wrote = self.write_channels(host, start, payload, schedule=False) or wrote
@@ -1002,6 +1093,7 @@ class ColorKineticsHub:
         self._drop_stale_registry_entries()
         self._default_fade = fade_seconds_of(self.entry)
         self._options_signature = options_signature(dict(self.entry.options))
+        self._followed_entry = follow_of(self.entry)
         self.pump.start()
 
     async def async_stop(self) -> None:
@@ -1009,6 +1101,13 @@ class ColorKineticsHub:
         if self._stopped:
             return
         self._stopped = True
+        pending = list(self._publish_tasks)
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._publish_tasks.clear()
         self._clear_issues()
         self.effects.runs.clear()
         self.effects.owners.clear()
@@ -1044,6 +1143,7 @@ class ColorKineticsHub:
                 except (KiNetError, OSError) as err:
                     _LOGGER.warning("Fixture scan failed for %s: %s", host, err)
                     self._create_issue("scan_failed", host)
+            await self.async_restore_panel()
         except Exception as err:  # noqa: BLE001 - keep the background task quiet
             self.last_error = err
             _LOGGER.exception("Color Kinetics refresh failed")
@@ -1082,6 +1182,7 @@ class ColorKineticsHub:
             self._scanned_hosts.add(host)
             self._delete_issue("scan_failed", host)
             await self._save()
+            await self.async_restore_panel()
 
     async def _read_supply_properties(self, host: str) -> None:
         """Read the supply properties QuickPlay reads. One miss does not stop the rest."""
@@ -1401,6 +1502,32 @@ class ColorKineticsHub:
             self.selected_look = selected
         else:
             self.selected_look = None
+        self._scenes = {}
+        raw_scenes = stored.get("scenes")
+        if isinstance(raw_scenes, dict):
+            for host, scenes in raw_scenes.items():
+                self._scenes[str(host)] = normalize_scene_map(scenes)
+        raw_ready = stored.get("scene_hosts")
+        self._scene_hosts = [str(host) for host in raw_ready] if isinstance(raw_ready, list) else []
+        self._panel = {}
+        self._panel_explicit = set()
+        self._show_clocks = {}
+        raw_panel = stored.get("panel")
+        if isinstance(raw_panel, dict):
+            for host, item in raw_panel.items():
+                panel = normalize_panel(item)
+                self._panel[str(host)] = panel
+                self._panel_explicit.add(str(host))
+                if panel.get("show_origin") is not None and panel.get("show_speed") is not None:
+                    self._show_clocks[str(host)] = (
+                        float(panel["show_origin"]),
+                        float(panel["show_speed"]),
+                    )
+                if panel.get("show_adopted"):
+                    self._adopted_clocks.add(str(host))
+        self._ensure_default_scenes()
+        for host in self.hosts:
+            self._panel.setdefault(host, default_panel())
 
     def _cache(self) -> dict[str, Any]:
         fixtures = {
@@ -1418,6 +1545,13 @@ class ColorKineticsHub:
             },
             "looks": self._looks,
             "selected_look": self.selected_look,
+            "scenes": self._scenes,
+            "scene_hosts": list(self._scene_hosts),
+            "panel": {
+                host: self._panel[host]
+                for host in self._panel
+                if host in self._panel_explicit or host in self._panel_touched
+            },
         }
 
     async def _save(self) -> None:
@@ -1475,6 +1609,12 @@ class ColorKineticsHub:
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_PALETTE}")
             keep.add(f"{self.all_fixtures_owner(host)}:{SUFFIX_EFFECT_DIRECTION}")
             keep.add(f"{ident}:{SUFFIX_LOOK}")
+            keep.add(f"{ident}:{SUFFIX_PANEL_EFFECT}")
+            keep.add(f"{ident}:{SUFFIX_PANEL_SCENE}")
+            keep.add(f"{ident}:{SUFFIX_PANEL_TARGET}")
+            keep.add(f"{ident}:{SUFFIX_PANEL_BRIGHTNESS}")
+            keep.add(f"{ident}:{SUFFIX_STOP_EFFECT}")
+            keep.add(f"{ident}:{SUFFIX_ALL_OFF}")
             keep.add(f"{ident}:{SUFFIX_DEFAULT_FADE}")
             keep.add(f"{ident}:{SUFFIX_POWER_TIME}")
             keep.add(f"{ident}:{SUFFIX_RAW}")
@@ -1519,6 +1659,682 @@ class ColorKineticsHub:
             }
             if identifiers and identifiers.isdisjoint(keep_devices):
                 device_registry.async_remove_device(device.id)
+
+    def _ensure_default_scenes(self) -> None:
+        """Give each supply the built-in scenes once.
+
+        A host stays in ``_scene_hosts`` after the user deletes a scene, so
+        the defaults are not put back on the next start.
+        """
+        for host in self.hosts:
+            if host in self._scene_hosts:
+                self._scenes.setdefault(host, {})
+                continue
+            self._scenes[host] = default_scenes()
+            self._scene_hosts.append(host)
+
+    def panel_state(self, host: str) -> dict[str, Any]:
+        """Copy of the control-panel record for one Data Enabler."""
+        return dict(self._panel.get(host) or default_panel())
+
+    def scene_names(self, host: str) -> list[str]:
+        """Scene names for one supply, sorted without regard to case."""
+        return sorted(self._scenes.get(host, {}), key=str.casefold)
+
+    def scene_record(self, host: str, name: str) -> dict[str, Any] | None:
+        """The stored scene, matched without regard to case."""
+        stored = find_scene_name(self._scenes.get(host, {}), name)
+        if stored is None:
+            return None
+        return self._scenes[host][stored]
+
+    def panel_target(self, host: str) -> str:
+        """Group id, or all fixtures. A deleted group falls back to all."""
+        target = str(self.panel_state(host).get("target") or TARGET_ALL)
+        if target == TARGET_ALL:
+            return TARGET_ALL
+        if any(group["id"] == target for group in self.light_groups()):
+            return target
+        return TARGET_ALL
+
+    def target_options(self, host: str) -> list[str]:
+        """Labels for the target selector. The value stored is the group id."""
+        del host
+        labels = [TARGET_ALL_LABEL]
+        for group in self.light_groups():
+            labels.append(self._group_label(group))
+        return labels
+
+    def target_option(self, host: str) -> str:
+        """Label currently selected for one supply."""
+        target = self.panel_target(host)
+        if target == TARGET_ALL:
+            return TARGET_ALL_LABEL
+        for group in self.light_groups():
+            if group["id"] == target:
+                return self._group_label(group)
+        return TARGET_ALL_LABEL
+
+    def _group_label(self, group: dict[str, Any]) -> str:
+        name = str(group.get("name") or "Group")
+        if name == TARGET_ALL_LABEL:
+            return f"{name} ({str(group['id'])[:4]})"
+        return name
+
+    def _target_id_from_option(self, option: str) -> str:
+        if option == TARGET_ALL_LABEL:
+            return TARGET_ALL
+        for group in self.light_groups():
+            if self._group_label(group) == option:
+                return str(group["id"])
+        return TARGET_ALL
+
+    def _panel_owner(self, host: str) -> str:
+        """Effect owner the panel is driving on this supply."""
+        target = self.panel_target(host)
+        if target == TARGET_ALL:
+            return self.all_fixtures_owner(host)
+        return self.group_owner(target)
+
+    def _host_for_panel_owner(self, owner: str) -> str | None:
+        """Supply whose panel target uses ``owner``, if any."""
+        for host in self.hosts:
+            if self._panel_owner(host) == owner:
+                return host
+        return None
+
+    def _target_light(self, host: str):
+        """All-fixtures or group light the panel currently addresses."""
+        target = self.panel_target(host)
+        if target == TARGET_ALL:
+            return self.supply_lights.get(host)
+        return self.group_lights.get(target)
+
+    def target_keys(self, host: str) -> list[str]:
+        """Fixture keys the panel target will paint, in show order."""
+        light = self._target_light(host)
+        if light is None:
+            return []
+        return [member._key for member in light._members()]
+
+    def add_panel_listener(self, listener: Listener) -> Any:
+        """Subscribe to panel changes. Returns an unsubscribe callback."""
+        self._panel_listeners.append(listener)
+
+        def _remove() -> None:
+            if listener in self._panel_listeners:
+                self._panel_listeners.remove(listener)
+
+        return _remove
+
+    def notify_panel(self) -> None:
+        """Tell the control-panel entities to read the hub again."""
+        for listener in list(self._panel_listeners):
+            listener()
+
+    def adopt_restore(self, host: str, **seed: Any) -> None:
+        """Remember an entity restore when storage has no panel for this supply.
+
+        Storage wins once a panel record has been saved. The entity restore
+        only fills a hub that was upgraded before the panel existed.
+        """
+        if host in self._panel_explicit or self._stopped:
+            return
+        bucket = self._restore_seeds.setdefault(host, {})
+        for key, value in seed.items():
+            if value is not None:
+                bucket[key] = value
+
+    def _merge_seeds(self) -> None:
+        for host, seed in self._restore_seeds.items():
+            if host in self._panel_explicit:
+                continue
+            state = self.panel_state(host)
+            if "brightness" in seed:
+                state["brightness"] = clamp_percent(seed["brightness"])
+            effect = seed.get("effect")
+            scene = seed.get("scene")
+            if effect and normalize_effect_option(str(effect)) != EFFECT_NONE:
+                state["effect"] = normalize_effect_option(str(effect))
+                state["scene"] = None
+                state["mode"] = MODE_EFFECT
+            elif scene:
+                stored = find_scene_name(self._scenes.get(host, {}), str(scene))
+                if stored is not None:
+                    state["scene"] = stored
+                    state["effect"] = EFFECT_NONE
+                    state["mode"] = MODE_SCENE
+            self._panel[host] = normalize_panel(state)
+            self._panel_touched.add(host)
+        self._restore_seeds.clear()
+
+    def _can_apply(self, host: str) -> bool:
+        """False until the target light exists and a pending show has fixtures."""
+        if self._target_light(host) is None:
+            return False
+        state = self.panel_state(host)
+        if state["mode"] in (MODE_IDLE, MODE_OFF):
+            return True
+        if self.target_keys(host):
+            return True
+        return host in self._scanned_hosts
+
+    async def async_restore_panel(self) -> None:
+        """Apply the stored effect or scene once the lights exist.
+
+        Called after the platforms are up, and again after a scan, so a
+        first-time discovery still resumes the selection.
+        """
+        if self._stopped:
+            return
+        self._merge_seeds()
+        for host in self.hosts:
+            if host in self._panel_applied or not self._can_apply(host):
+                continue
+            await self._apply_mode(host, restart_clock=False)
+            self._panel_applied.add(host)
+            self._panel_touched.add(host)
+        if self._panel_touched:
+            await self._save()
+        self.notify_panel()
+        if not self._syncing:
+            await self.async_pull_leader()
+            await self.async_publish_followers()
+
+    async def _apply_mode(self, host: str, *, restart_clock: bool) -> None:
+        state = self.panel_state(host)
+        if self._stopped:
+            return
+        if state["mode"] == MODE_EFFECT and state["effect"] != EFFECT_NONE:
+            await self._run_effect(host, str(state["effect"]), restart_clock=restart_clock)
+            return
+        if state["mode"] == MODE_SCENE and state.get("scene"):
+            await self._run_scene(host, str(state["scene"]))
+            return
+        if state["mode"] == MODE_OFF:
+            await self._apply_all_off(host)
+            return
+        self._stop_target_effect(host)
+
+    async def _run_effect(self, host: str, effect: str, *, restart_clock: bool) -> None:
+        light = self._target_light(host)
+        if light is None:
+            return
+        speed = self.effect_speed(light._owner_id)
+        if restart_clock or host not in self._show_clocks:
+            self._adopted_clocks.discard(host)
+            self._show_clocks[host] = (self.show_clock(), float(speed))
+            self._store_clock(host)
+        level = percent_to_brightness(self.panel_state(host)["brightness"])
+        self._applying = True
+        try:
+            if effect == EFFECT_SOLID and level == 0:
+                await light.async_turn_off()
+                return
+            paint = level if level > 0 else 1
+            await light.async_turn_on(effect=effect, brightness=paint)
+            if level == 0:
+                run = self.effects.runs.get(light._owner_id)
+                if run is not None:
+                    run.brightness = 0
+                light._attr_brightness = 0
+                light.publish()
+        finally:
+            self._applying = False
+
+    async def _run_scene(self, host: str, name: str) -> bool:
+        record = self.scene_record(host, name)
+        light = self._target_light(host)
+        if record is None or light is None:
+            return False
+        self.effects.stop(light._owner_id)
+        light._attr_effect = EFFECT_SOLID
+        members = list(light._members())
+        keys = [member._key for member in members]
+        assignments = {
+            key: (rgb, pct)
+            for key, rgb, pct in resolve_scene(record, keys, offset=self._scene_offset(host))
+        }
+        self.note_command(keys)
+        for member in members:
+            found = assignments.get(member._key)
+            if found is None:
+                continue
+            rgb, pct = found
+            member.apply_panel_color(rgb, percent_to_brightness(pct))
+        light._attr_effect = EFFECT_SOLID
+        light._attr_is_on = any(member.is_on for member in members)
+        light.publish()
+        self.notify_light_states()
+        return True
+
+    def _scene_offset(self, host: str) -> int:
+        """Fixtures ahead of this supply in the combined show order."""
+        row = self._show_row(host)
+        if len(row) < 2:
+            return 0
+        count = 0
+        for hub, member_host in row:
+            if hub is self and member_host == host:
+                return count
+            count += len(hub.target_keys(member_host))
+        return 0
+
+    def _stop_target_effect(self, host: str) -> None:
+        """Stop the panel target. The channel bytes stay as they are."""
+        light = self._target_light(host)
+        owner = light._owner_id if light is not None else self._panel_owner(host)
+        self.effects.stop(owner)
+        if light is None:
+            return
+        light._attr_effect = EFFECT_SOLID
+        light.publish()
+
+    def _update_panel(self, host: str, **changes: Any) -> None:
+        state = self.panel_state(host)
+        state.update(changes)
+        self._panel[host] = normalize_panel(state)
+        self._store_clock(host)
+
+    def _store_clock(self, host: str) -> None:
+        state = self.panel_state(host)
+        clock = self._show_clocks.get(host)
+        if clock is None:
+            state["show_origin"] = None
+            state["show_speed"] = None
+        else:
+            state["show_origin"] = float(clock[0])
+            state["show_speed"] = float(clock[1])
+        state["show_adopted"] = host in self._adopted_clocks
+        self._panel[host] = state
+
+    def _retarget_show_clock(self, host: str, new_speed: float) -> None:
+        """Keep the show phase when the leader's speed slider moves."""
+        now = self.show_clock()
+        current = self._show_clocks.get(host)
+        if current is None:
+            self._show_clocks[host] = (now, float(new_speed))
+        else:
+            origin, speed = current
+            if float(new_speed) != float(speed):
+                origin = retarget_origin(now, origin, speed, float(new_speed))
+            self._show_clocks[host] = (float(origin), float(new_speed))
+        self._store_clock(host)
+
+    async def _commit_panel(self, host: str) -> None:
+        if self._stopped:
+            return
+        self._panel_touched.add(host)
+        self._panel_applied.add(host)
+        self.notify_panel()
+        await self._save()
+        if self._stopped or self._syncing:
+            return
+        await self.async_publish_host(host)
+
+    async def async_select_effect(self, host: str, effect: str) -> None:
+        """Run ``effect`` on the panel target. None leaves the current colors."""
+        chosen = normalize_effect_option(effect)
+        previous = self.panel_state(host)
+        if chosen == EFFECT_NONE:
+            self._stop_target_effect(host)
+            self._update_panel(host, effect=EFFECT_NONE, scene=None, mode=MODE_IDLE)
+            await self._commit_panel(host)
+            return
+        restart = previous.get("effect") != chosen or previous.get("mode") != MODE_EFFECT
+        self._update_panel(host, effect=chosen, scene=None, mode=MODE_EFFECT)
+        await self._run_effect(host, chosen, restart_clock=restart)
+        await self._commit_panel(host)
+
+    async def async_select_scene(self, host: str, name: str) -> None:
+        """Paint a stored scene and stop whatever effect was running."""
+        record_name = find_scene_name(self._scenes.get(host, {}), name)
+        record = None if record_name is None else self._scenes[host][record_name]
+        if record_name is None or record is None:
+            return
+        self._stop_target_effect(host)
+        self._update_panel(
+            host,
+            effect=EFFECT_NONE,
+            scene=record_name,
+            mode=MODE_SCENE,
+            brightness=clamp_percent(record.get("brightness"), fallback=100),
+        )
+        await self._run_scene(host, record_name)
+        await self._commit_panel(host)
+
+    async def async_select_target(self, host: str, option: str) -> None:
+        """Move the running effect or scene onto another group."""
+        previous_owner = self._panel_owner(host)
+        target = self._target_id_from_option(option)
+        self._update_panel(host, target=target)
+        if previous_owner != self._panel_owner(host):
+            self.effects.stop(previous_owner)
+            previous = self._light_for_owner(previous_owner)
+            if previous is not None:
+                previous._attr_effect = EFFECT_SOLID
+                previous.publish()
+        await self._apply_mode(host, restart_clock=False)
+        await self._commit_panel(host)
+
+    async def async_set_brightness(self, host: str, percent: float) -> None:
+        """Set the panel level and push it to the current target."""
+        level = clamp_percent(percent)
+        self._update_panel(host, brightness=level)
+        await self._apply_brightness_level(host, level)
+        await self._commit_panel(host)
+
+    async def _apply_brightness_level(self, host: str, percent: int) -> None:
+        light = self._target_light(host)
+        if light is None:
+            return
+        level = percent_to_brightness(percent)
+        state = self.panel_state(host)
+        if state["mode"] == MODE_EFFECT:
+            run = self.effects.runs.get(light._owner_id)
+            if run is not None:
+                run.brightness = level
+            light._attr_brightness = level
+            if level > 0:
+                light._attr_is_on = True
+            light._remember_members()
+            light.publish()
+            self.notify_light_states()
+            return
+        for member in light._members():
+            if state["mode"] != MODE_SCENE and not member.is_on:
+                continue
+            member._attr_brightness = level
+            member._attr_is_on = level > 0
+            member._push()
+            if member.hass is not None:
+                member.async_write_ha_state()
+        light._attr_brightness = level
+        light.publish()
+        self.notify_light_states()
+
+    async def async_stop_effect(self, host: str) -> None:
+        """Stop the animation and leave the colors where they are."""
+        state = self.panel_state(host)
+        self._stop_target_effect(host)
+        if state["mode"] == MODE_EFFECT:
+            self._update_panel(host, effect=EFFECT_NONE, mode=MODE_IDLE)
+        else:
+            self._update_panel(host, effect=EFFECT_NONE)
+        await self._commit_panel(host)
+
+    async def _apply_all_off(self, host: str) -> None:
+        """Turn the target off. Callers publish the off mode themselves."""
+        if self._stopped:
+            return
+        light = self._target_light(host)
+        self.effects.stop(light._owner_id if light is not None else self._panel_owner(host))
+        self._applying = True
+        try:
+            if light is not None and not self._stopped:
+                await light.async_turn_off()
+        finally:
+            self._applying = False
+
+    async def async_all_off(self, host: str) -> None:
+        """Turn the panel target off. The fade is the supply's default fade."""
+        self._update_panel(host, effect=EFFECT_NONE, scene=None, mode=MODE_OFF)
+        await self._apply_all_off(host)
+        await self._commit_panel(host)
+
+    async def async_upsert_scene(
+        self,
+        host: str,
+        name: str,
+        scene: dict[str, Any],
+        *,
+        previous: str | None = None,
+    ) -> str | None:
+        """Store a scene. Returns an error key, or None when it was saved."""
+        clean = str(name).strip()
+        if not clean:
+            return "invalid_scene"
+        normalized = normalize_scene(scene)
+        if normalized is None:
+            return "invalid_scene"
+        current = self._scenes.setdefault(host, {})
+        prior = find_scene_name(current, previous) if previous else None
+        conflict = find_scene_name(current, clean)
+        if conflict is not None and conflict != prior:
+            return "duplicate_scene"
+        if prior is not None and prior != clean:
+            current.pop(prior, None)
+            if self.panel_state(host).get("scene") == prior:
+                self._update_panel(host, scene=clean)
+        current[clean] = normalized
+        if host not in self._scene_hosts:
+            self._scene_hosts.append(host)
+        self._panel_touched.add(host)
+        await self._save()
+        self.notify_panel()
+        return None
+
+    async def async_delete_scene(self, host: str, name: str) -> None:
+        """Remove a scene. Deleting the selected one leaves the colors up."""
+        current = self._scenes.setdefault(host, {})
+        stored = find_scene_name(current, name)
+        if stored is None:
+            return
+        current.pop(stored, None)
+        if self.panel_state(host).get("scene") == stored:
+            self._update_panel(host, scene=None, effect=EFFECT_NONE, mode=MODE_IDLE)
+        if host not in self._scene_hosts:
+            self._scene_hosts.append(host)
+        await self._save()
+        self.notify_panel()
+
+    def _follow_links(self) -> dict[str, str]:
+        links: dict[str, str] = {}
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            links[entry.entry_id] = follow_of(entry)
+        links.setdefault(self.entry.entry_id, follow_of(self.entry))
+        return links
+
+    def _hub_for(self, entry_id: str):
+        if entry_id == self.entry.entry_id:
+            return self
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return None
+        hub = getattr(entry, "runtime_data", None)
+        if hub is None or getattr(hub, "_stopped", False):
+            return None
+        return hub
+
+    def _direct_follower_hubs(self) -> list[Any]:
+        found = []
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if follow_of(entry) != self.entry.entry_id:
+                continue
+            hub = self._hub_for(entry.entry_id)
+            if hub is not None and hub is not self:
+                found.append(hub)
+        found.sort(key=lambda hub: hub.entry.entry_id)
+        return found
+
+    def _show_row(self, host: str) -> list[tuple[Any, str]]:
+        """Leader first, then followers, paired by supply index."""
+        if host not in self.hosts:
+            return []
+        index = self.hosts.index(host)
+        links = self._follow_links()
+        root = root_of(links, self.entry.entry_id)
+        row: list[tuple[Any, str]] = []
+        for entry_id in chain_members(links, root):
+            hub = self._hub_for(entry_id)
+            if hub is None or index >= len(hub.hosts):
+                continue
+            row.append((hub, hub.hosts[index]))
+        return row
+
+    def _effect_syncs(self) -> dict[str, tuple[Any, float]]:
+        """Shared phase and combined index for each panel effect in a show.
+
+        A follower that copied the leader's clock keeps that phase when it is
+        the only hub left running. A solo effect that never followed anyone
+        still uses ``EffectRun.phase_at``.
+        """
+        syncs: dict[str, tuple[Any, float]] = {}
+        for host in self.hosts:
+            if self.panel_state(host).get("mode") != MODE_EFFECT:
+                continue
+            row = self._show_row(host)
+            if len(row) >= 2:
+                root_hub, root_host = row[0]
+                clock = root_hub._show_clocks.get(root_host)
+                if clock is None:
+                    continue
+                origin, speed = clock
+                phase = show_phase(root_hub.show_clock(), speed, origin)
+                local: dict[str, int] = {}
+                cursor = 0
+                for hub, member_host in row:
+                    for key in hub.target_keys(member_host):
+                        if hub is self:
+                            local[key] = cursor
+                        cursor += 1
+                total = cursor
+            elif host in self._adopted_clocks and host in self._show_clocks:
+                origin, speed = self._show_clocks[host]
+                phase = show_phase(self.show_clock(), speed, origin)
+                local = {
+                    key: index for index, key in enumerate(self.target_keys(host))
+                }
+                total = len(local)
+            else:
+                continue
+            if total <= 0:
+                continue
+
+            def _placement(key: str, _local: dict[str, int] = local, _total: int = total):
+                index = _local.get(key)
+                if index is None:
+                    return None
+                return index, _total
+
+            syncs[self._panel_owner(host)] = (_placement, phase)
+        return syncs
+
+    def _spawn(self, coro: Any, name: str) -> None:
+        """Track a publish task so unload cancels it before it can save."""
+        if self._stopped:
+            coro.close()
+            return
+        self._task_serial += 1
+        task = self.entry.async_create_background_task(
+            self.hass, coro, f"{name} {self._task_serial}"
+        )
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
+
+    def note_follow_option(self) -> None:
+        """A follow-hub change was stored. Pull the leader without reloading."""
+        if self._stopped:
+            return
+        self._spawn(self.async_pull_leader(), "color_kinetics follow")
+
+    def _schedule_publish(self, host: str) -> None:
+        if self._syncing or self._stopped or self._applying:
+            return
+        if not self._direct_follower_hubs():
+            return
+        self._spawn(self.async_publish_host(host), "color_kinetics publish")
+
+    def _apply_speed_entity(self, owner: str, speed: float) -> None:
+        slider = self.speed_entities.get(owner)
+        if slider is not None:
+            slider.apply_external_speed(speed)
+            return
+        self.set_effect_speed(owner, speed)
+
+    async def async_pull_leader(self) -> None:
+        """Copy the leader's panel when this entry follows one."""
+        leader = self._hub_for(follow_of(self.entry))
+        if leader is None:
+            return
+        for index, host in enumerate(leader.hosts):
+            if index >= len(self.hosts):
+                break
+            await leader.async_publish_host(host)
+
+    async def async_publish_followers(self) -> None:
+        for host in self.hosts:
+            await self.async_publish_host(host)
+
+    async def async_publish_host(self, host: str, *, _seen: set[str] | None = None) -> None:
+        """Push this supply's panel to entries that follow us, then onward."""
+        if self._stopped or host not in self.hosts:
+            return
+        seen = set(_seen or ())
+        if self.entry.entry_id in seen:
+            return
+        seen.add(self.entry.entry_id)
+        index = self.hosts.index(host)
+        for follower in self._direct_follower_hubs():
+            if index >= len(follower.hosts):
+                continue
+            try:
+                await follower.async_accept(self, host, follower.hosts[index])
+                await follower.async_publish_host(follower.hosts[index], _seen=seen)
+            except Exception:  # noqa: BLE001 - one follower must not stop the rest
+                _LOGGER.exception("Could not mirror %s onto a following Data Enabler", host)
+
+    async def async_accept(self, leader: Any, leader_host: str, host: str) -> None:
+        """Mirror one supply of ``leader`` onto ``host``."""
+        if self._stopped or host not in self.hosts or leader is None:
+            return
+        state = leader.panel_state(leader_host)
+        if state.get("mode") == MODE_SCENE:
+            mirrored = find_scene_name(self._scenes.get(host, {}), str(state.get("scene") or ""))
+            if mirrored is None:
+                state = dict(state)
+                state["mode"] = MODE_IDLE
+                state["scene"] = None
+                state["effect"] = EFFECT_NONE
+            else:
+                state = dict(state)
+                state["scene"] = mirrored
+        self._sync_depth += 1
+        try:
+            if self._stopped:
+                return
+            self._panel[host] = normalize_panel(state)
+            self._panel_touched.add(host)
+            self._panel_applied.add(host)
+            speed = leader.effect_speed(leader._panel_owner(leader_host))
+            self._apply_speed_entity(self._panel_owner(host), speed)
+            if leader_host in leader._show_clocks:
+                self._show_clocks[host] = tuple(leader._show_clocks[leader_host])
+                self._adopted_clocks.add(host)
+                self._store_clock(host)
+            elif state.get("mode") != MODE_EFFECT:
+                self._adopted_clocks.discard(host)
+            await self._apply_mode(host, restart_clock=False)
+            if self._stopped:
+                return
+            if (
+                state.get("mode") == MODE_SCENE
+                and not self._scene_brightness_matches(host)
+            ):
+                await self._apply_brightness_level(host, int(self.panel_state(host)["brightness"]))
+        finally:
+            self._sync_depth = max(0, self._sync_depth - 1)
+        if self._stopped:
+            return
+        self.notify_panel()
+        await self._save()
+
+    def _scene_brightness_matches(self, host: str) -> bool:
+        state = self.panel_state(host)
+        record = self.scene_record(host, str(state.get("scene") or ""))
+        if record is None:
+            return True
+        return clamp_percent(record.get("brightness"), fallback=100) == int(state["brightness"])
 
     def _clear_issues(self) -> None:
         """Remove repair issues for every supply this entry has talked to."""
